@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "sqlite-ro": {
+      "command": "python",
+      "args": ["-m", "mcp_tools.sqlite_ro"],
+      "cwd": ".."
+    },
+    "files-safe": {
+      "command": "python",
+      "args": ["-m", "mcp_tools.files_safe"],
+      "cwd": ".."
+    },
+    "http-fetch": {
+      "command": "python",
+      "args": ["-m", "mcp_tools.http_fetch"],
+      "cwd": ".."
+    }
+  }
+}
