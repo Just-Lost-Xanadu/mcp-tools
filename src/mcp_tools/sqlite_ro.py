@@ -1,8 +1,21 @@
 """MCP Server：只读 SQLite 查询。
 
-- 以 SQLite 只读 URI（mode=ro）打开，DB 层强制只读；
-- 上层再叠加 validate_readonly_sql：仅 SELECT/WITH/EXPLAIN，拦截多语句/注释/注入特征；
-- 结果行数上限，防止结果集过大；语句执行级超时未实现，不对外宣称。
+对外以 FastMCP 暴露三个工具：list_tables_tool / describe_table_tool / query_sql_tool。
+SQLite 只读由三层共同保证：
+  1) defense in depth（纵深）：DB 打开即用「只读 URI mode=ro」+ `PRAGMA query_only=ON`，
+     即使 SQL 层校验漏了，数据库本身也不接受写；
+  2) 应用层再叠加 validate_readonly_sql：只允许 SELECT/WITH/EXPLAIN，拦多语句/注释/注入特征；
+  3) 结果行数上限，防止结果集过大；语句执行级超时未实现，不对外宣称。
+
+【OOP 说明】本模块主体是函数（_connect/_rows_to_text/各查询函数），FastMCP 的 @mcp.tool
+装饰把它们"变成工具"。真正需要一个"类"的是当你想对同一份代码同时服务多个不同 db 连接
+或做依赖注入做单测时可抽成：
+    class ReadonlySqliteServer:
+        def __init__(self, db_path): self.db_path = db_path        # 持有路径 => 状态
+        def list_tables(self) -> str: ...
+        def describe_table(self, table) -> str: ...
+        def as_mcp(self) -> FastMCP:  # 用 self 方法装饰工具并返回 FastMCP
+本项目 demo 只需要固定一个 db，所以用轻量函数 + create_server(db_path) 闭包注入即可。
 
 运行（stdio）：python -m mcp_tools.sqlite_ro
 环境变量：MCP_SQLITE_DB（默认当前目录 demo.db，可用 scripts/make_demo_db.py 生成）
@@ -21,6 +34,13 @@ MAX_ROWS = 200
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
+    """以只读模式打开 SQLite 连接（DB 层强制只读的落点）。
+
+    每次调用都新开连接、用完即 close（工具调用本身低频，无池化成本）；
+    关键点：uri=f"{……}?mode=ro" 让 SQLite 以只读 URI 打开（file: 探针拒绝写），
+    `PRAGMA query_only=ON` 再补一道保险——两道都在 DB 层，独立于 SQL 文本校验，
+    因此"文本层漏放行也无法真正写库"。
+    """
     if not db_path.is_file():
         raise FileNotFoundError(f"数据库不存在：{db_path}（先运行 scripts/make_demo_db.py）")
     uri = f"{db_path.resolve().as_uri()}?mode=ro"
@@ -39,6 +59,10 @@ def _rows_to_text(columns: list[str], rows: list[tuple], truncated: bool) -> str
 
 
 def list_tables(db_path: str) -> str:
+    """返回业务表名（按字母序，每行一个）。
+
+    排除 sqlite 内部表（NOT LIKE 'sqlite_%'）：对模型暴露的就是"干净的可查表清单"。
+    """
     conn = _connect(Path(db_path))
     try:
         rows = conn.execute(
@@ -53,6 +77,13 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def describe_table(db_path: str, table: str) -> str:
+    """查看某表结构：列名/类型/是否可空/主键(用 PRAGMA table_info)。
+
+    - PRAGMA 名字是拼进 SQL 的，因此 table 必须先过 _IDENTIFIER 白名单正则（只允许 [A-Za-z0-9_]
+      组成的标识符），杜绝把任意字符串拼进 PRAGMA —— 这是"表名注入"的闸口；
+    - 先查 sqlite_master 确认表真实存在，不存在返回纯校验错误文本（不抛异常，走正常返回，
+      模型能读到"表不存在"而自行纠错）。
+    """
     if not _IDENTIFIER.fullmatch(table):
         return f"表不存在：{table}"
     conn = _connect(Path(db_path))
@@ -75,6 +106,15 @@ def describe_table(db_path: str, table: str) -> str:
 
 
 def query_sql(db_path: str, sql: str) -> str:
+    """执行一条只读 SQL 并返回表格文本，最多 MAX_ROWS(200) 行。
+
+    流程：先 validate_readonly_sql（文本闸）→ 再 _connect（只读 URI/query_only DB 闸）→
+    执行 → fetchmany(MAX_ROWS+1) 探测是否超量（多取一行来判断 truncated）。
+
+    安全要点：真正执行的 SQL 是模型给的文本，因此两道闸缺一不可；即便文本校验写出 bug，
+    DB 层也只读，写不进去（纵深防御）。结果用 fetchmany 而非 fetchall，超大结果集不会一次
+    拉爆内存，只取前 200 行返回给模型即可。
+    """
     sql = validate_readonly_sql(sql)
     conn = _connect(Path(db_path))
     try:

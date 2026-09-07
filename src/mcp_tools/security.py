@@ -1,7 +1,21 @@
 """工具域共用的安全守卫：只读 SQL / 路径白名单。
 
-原则：宁可拒绝、不可放行。所有校验失败都抛 ValueError，由工具层转成错误文本
-返回给模型（工具错误也要"看得见"，便于模型自纠或如实告知）。
+两个 server（sqlite_ro / files_safe）内部都复用这里的校验函数，保证"安全逻辑只写一份、
+任何人/任何场景都走同一闸口"。
+
+原则：宁可拒绝、不可放行。所有校验失败都抛 ValueError，由工具层转成错误文本返回给
+模型（工具错误也要"看得见"，便于模型自纠或如实告知）。
+
+【设计说明：为何用模块函数而不是 class？】
+本项目刻意保持小：两处安全校验彼此无共享状态、无生命周期，模块顶层函数是"最简组合"。
+如果未来出现"多个 server 各自实例化不同白名单 / 不同只读范围"的需求（要带配置的状态），
+就应重构为身份类，例如：
+    class ReadonlyGuard:
+        def __init__(self, allow_keywords: set[str]): ...
+        def validate(self, sql: str) -> str: ...
+调用方按需 `ReadonlyGuard(allow_keywords={...})` 并持有实例——这在语义上等价但把
+"每个 server 自己的约束"变成了对象状态，多个实例互不干扰。
+本项目现在没有这种"多实例不同配置"的场景，所以保留模块函数以减熵。
 """
 
 import re
@@ -19,6 +33,11 @@ _SQL_BLOCK = (";", "--", "/*", "*/", "\\")
 def validate_readonly_sql(sql: str) -> str:
     """只允许单条只读查询：以 select/with/explain/pragma 开头，
     且不含多语句/注释/UNION/写类 PRAGMA 特征。
+
+    被调用方：sqlite_ro.query_sql 在真正执行前先过这里（第一道闸）。
+
+    返回：去掉首尾空白的原 SQL（放行时原样返回，不做任何改写）。
+    抛出：ValueError —— 命中任意一条禁止特征即抛，绝不静默放行。
 
     - union 只按整词拦（\\bunion\\b），避免误伤含 union 子串的列名/字符串
       （如 communication、reunion）；真正的写库由"只读 URI + query_only"双保险兜底。
@@ -41,7 +60,15 @@ def validate_readonly_sql(sql: str) -> str:
 
 
 def resolve_within_root(path: str, root: Path) -> Path:
-    """把相对/绝对路径解析后，确保落在白名单根目录内（防目录穿越）。"""
+    """把传入的相对/绝对路径，realpath 归一化后确保落在白名单根目录内（防目录穿越）。
+
+    被调用方：files_safe 的 list_dir / read_file / glob_files 三处工具入口，第一步都过这里。
+    处理：绝对路径直接用；相对路径视为"相对 root"解析；随后 .resolve() 跟掉 .. 与符号链接，
+    只剩真路径再判归属。
+
+    返回：解析后的绝对 Path（已确认在 root 内）。
+    抛出：ValueError —— 解析后落在 root 之外（含恰为 root 的祖先），即穿越/越权，直接拒。
+    """
     root = root.resolve()
     target = Path(path)
     if not target.is_absolute():
