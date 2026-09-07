@@ -1,28 +1,42 @@
-"""三类工具域共用的安全守卫：只读 SQL / 路径白名单 / 域名白名单。
+"""工具域共用的安全守卫：只读 SQL / 路径白名单。
 
 原则：宁可拒绝、不可放行。所有校验失败都抛 ValueError，由工具层转成错误文本
 返回给模型（工具错误也要"看得见"，便于模型自纠或如实告知）。
 """
 
-import ipaddress
 import re
 from pathlib import Path
-from urllib.parse import urlparse
 
 _SQL_HEAD = re.compile(r"^\s*(select|with|explain|describe|pragma)\b", re.IGNORECASE)
-_SQL_BLOCK = (";", "--", "/*", "*/", "\\", "union", "pragma write")
+_SQL_UNION = re.compile(r"\bunion\b")
+_SQL_PRAGMA_WRITE = re.compile(
+    r"\bpragma\s+(journal_mode|synchronous|locking_mode|wal_checkpoint|cache_size)\b",
+    re.IGNORECASE,
+)
+_SQL_BLOCK = (";", "--", "/*", "*/", "\\")
 
 
 def validate_readonly_sql(sql: str) -> str:
-    """只允许单条只读查询：以 select/with/explain 开头，且不含注入/多语句特征。"""
+    """只允许单条只读查询：以 select/with/explain/pragma 开头，
+    且不含多语句/注释/UNION/写类 PRAGMA 特征。
+
+    - union 只按整词拦（\\bunion\\b），避免误伤含 union 子串的列名/字符串
+      （如 communication、reunion）；真正的写库由"只读 URI + query_only"双保险兜底。
+    - describe/pragma 属于查询前辅助（describe_table 内部用 PRAGMA table_info），
+      写入类 PRAGMA 由 _SQL_PRAGMA_WRITE 单独拦截，最终写库由 DB 层只读兜底。
+    """
     if not sql or not isinstance(sql, str):
         raise ValueError("SQL 不能为空")
     if not _SQL_HEAD.match(sql):
         raise ValueError("仅允许 SELECT/WITH/EXPLAIN 只读查询")
     lowered = sql.lower()
     for token in _SQL_BLOCK:
-        if token in lowered and token not in ("select",):
+        if token in lowered:
             raise ValueError(f"检测到不允许的内容：{token}")
+    if _SQL_UNION.search(lowered):
+        raise ValueError("检测到不允许的内容：union")
+    if _SQL_PRAGMA_WRITE.search(lowered):
+        raise ValueError("检测到不允许的内容：写类 PRAGMA")
     return sql.strip()
 
 
@@ -36,35 +50,3 @@ def resolve_within_root(path: str, root: Path) -> Path:
     if resolved != root and root not in resolved.parents:
         raise ValueError(f"路径超出白名单目录：{path}")
     return resolved
-
-
-def _is_private_ip(host: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-
-
-def host_allowed(host: str, allow_domains: frozenset[str]) -> bool:
-    """域名白名单：精确匹配或子域名归属白名单内。"""
-    if not allow_domains:
-        raise ValueError("未配置允许访问的域名，拒绝请求")
-    if host in allow_domains:
-        return True
-    return any(host.endswith("." + domain) for domain in allow_domains)
-
-
-def validate_fetch_url(url: str, allow_domains: frozenset[str]) -> str:
-    """HTTP 抓取守卫：仅 http/https、域名白名单、禁止内网/保留地址。"""
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("仅允许 http/https 链接")
-    host = parsed.hostname
-    if not host:
-        raise ValueError("URL 缺少主机名")
-    if _is_private_ip(host):
-        raise ValueError("禁止访问内网/保留地址")
-    if not host_allowed(host, allow_domains):
-        raise ValueError(f"域名不在白名单内：{host}")
-    return url

@@ -5,12 +5,7 @@ from pathlib import Path
 import pytest
 
 from mcp_tools.files_safe import glob_files, list_dir, read_file
-from mcp_tools.security import (
-    host_allowed,
-    resolve_within_root,
-    validate_fetch_url,
-    validate_readonly_sql,
-)
+from mcp_tools.security import resolve_within_root, validate_readonly_sql
 from mcp_tools.sqlite_ro import list_tables, query_sql, describe_table
 
 
@@ -41,21 +36,6 @@ def test_path_traversal_rejected(tmp_path):
 def test_absolute_outside_rejected(tmp_path):
     with pytest.raises(ValueError):
         resolve_within_root(str(Path(tempfile.gettempdir())), tmp_path)
-
-
-# ---------- HTTP 域名白名单 ----------
-def test_http_allow_domains():
-    allow = frozenset({"example.com"})
-    assert host_allowed("example.com", allow)
-    assert host_allowed("api.example.com", allow)
-    assert not host_allowed("evil.com", allow)
-
-
-def test_http_reject_private_ip():
-    with pytest.raises(ValueError):
-        validate_fetch_url("http://127.0.0.1/", frozenset({"127.0.0.1"}))
-    with pytest.raises(ValueError):
-        validate_fetch_url("http://192.168.1.1/", frozenset({"192.168.1.1"}))
 
 
 # ---------- SQLite server 工具（直连函数，不走网络） ----------
@@ -94,3 +74,19 @@ def test_files_read_and_list(tmp_path):
     assert "note.md" in list_dir(tmp_path)
     assert "hello" in read_file(tmp_path, "note.md")
     assert "note.md" in glob_files(tmp_path, "*.md")
+
+
+# ---------- 加固回归：union 词边界 / 表名注入 ----------
+def test_sql_union_word_boundary_not_substring():
+    # 含 union 子串的字符串不应被误拦
+    assert validate_readonly_sql(
+        "SELECT name FROM regions WHERE name='communication'"
+    )
+    # 真正的 UNION 关键字仍拦
+    with pytest.raises(ValueError):
+        validate_readonly_sql("SELECT id FROM regions UNION SELECT id FROM products")
+
+
+def test_describe_table_rejects_non_identifier(demo_db):
+    out = describe_table(demo_db, 'regions" ; DROP TABLE regions; --')
+    assert "表不存在" in out

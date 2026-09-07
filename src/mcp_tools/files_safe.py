@@ -35,12 +35,22 @@ def read_file(root: Path, relative_path: str) -> str:
     return text
 
 
+MAX_GLOB_RESULTS = 200
+
+
 def glob_files(root: Path, pattern: str) -> str:
     if not pattern:
         return "（pattern 不能为空）"
     hits = [str(p.relative_to(root)) for p in root.rglob(pattern) if p.is_file()]
     hits.sort()
-    return "\n".join(hits) if hits else "（无匹配文件）"
+    if not hits:
+        return "（无匹配文件）"
+    if len(hits) > MAX_GLOB_RESULTS:
+        hits = hits[:MAX_GLOB_RESULTS]
+        return "\n".join(hits) + (
+            f"\n...（命中过多，仅显示前 {MAX_GLOB_RESULTS} 个，请用更精确的 pattern）"
+        )
+    return "\n".join(hits)
 
 
 def create_server(root: str | None = None) -> FastMCP:

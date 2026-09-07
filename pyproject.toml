@@ -1,13 +1,10 @@
 [project]
 name = "mcp-tools"
 version = "0.1.0"
-description = "企业 MCP 工具套件：只读 SQLite / 受限文件系统 / 受限 HTTP，stdio + Streamable HTTP 远程"
+description = "企业 MCP 工具套件：只读 SQLite / 受限文件系统（stdio 接入）"
 requires-python = ">=3.10"
 dependencies = [
     "mcp[cli]>=1.9,<2",
-    "httpx>=0.27",
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
 ]
 
 [project.optional-dependencies]

@@ -2,13 +2,14 @@
 
 - 以 SQLite 只读 URI（mode=ro）打开，DB 层强制只读；
 - 上层再叠加 validate_readonly_sql：仅 SELECT/WITH/EXPLAIN，拦截多语句/注释/注入特征；
-- 结果行数上限 + 超时，防拖垮服务。
+- 结果行数上限，防止结果集过大；语句执行级超时未实现，不对外宣称。
 
 运行（stdio）：python -m mcp_tools.sqlite_ro
 环境变量：MCP_SQLITE_DB（默认当前目录 demo.db，可用 scripts/make_demo_db.py 生成）
 """
 
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -48,9 +49,19 @@ def list_tables(db_path: str) -> str:
     return "\n".join(r[0] for r in rows) or "（空库）"
 
 
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def describe_table(db_path: str, table: str) -> str:
+    if not _IDENTIFIER.fullmatch(table):
+        return f"表不存在：{table}"
     conn = _connect(Path(db_path))
     try:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if exists is None:
+            return f"表不存在：{table}"
         rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
     finally:
         conn.close()
