@@ -66,10 +66,27 @@ def glob_files(root: Path, pattern: str) -> str:
 
     用 pathlib.rglob（不默认跟随目录 symlink），命中过多时只返回前 MAX_GLOB_RESULTS 条提示
     缩小 pattern——防止一整棵大目录被模型一条 glob 全部拉回。
+
+    安全（与 list_dir / read_file 同一闸口，两道）：
+      1. pattern 本身不允许绝对路径或 `..`——pathlib 对 `..` 只做词法拼接、不 resolve，
+         否则 `../*.txt` 会枚举到白名单之外；
+      2. 每个命中都过 resolve_within_root，realpath 落在 root 外（含指向外部的符号链接）即丢弃。
     """
     if not pattern:
         return "（pattern 不能为空）"
-    hits = [str(p.relative_to(root)) for p in root.rglob(pattern) if p.is_file()]
+    raw = Path(pattern)
+    if raw.is_absolute() or ".." in raw.parts:
+        return "（pattern 不允许绝对路径或 .. ）"
+    root = root.resolve()
+    hits: list[str] = []
+    for path in root.rglob(pattern):
+        if not path.is_file():
+            continue
+        try:
+            resolve_within_root(str(path), root)
+        except ValueError:
+            continue
+        hits.append(str(path.relative_to(root)))
     hits.sort()
     if not hits:
         return "（无匹配文件）"

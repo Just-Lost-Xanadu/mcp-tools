@@ -8,12 +8,12 @@
 | Server | 工具 | 安全设计 |
 |---|---|---|
 | `sqlite-ro` 只读 SQLite | `list_tables` / `describe_table` / `query_sql` | SQLite **只读 URI(mode=ro)** + 只允许 `SELECT/WITH/EXPLAIN`、拦多语句/注释/注入；结果 ≤200 行 |
-| `files-safe` 受限文件 | `list_dir` / `read_file` / `glob` | 白名单根目录：realpath 越界即拒（防目录穿越）；读文件有大小上限 |
+| `files-safe` 受限文件 | `list_dir` / `read_file` / `glob` | 白名单根目录：三个入口都过 realpath 校验（`glob` 另拒绝对路径与 `..` pattern），越界即拒（防目录穿越）；读文件有输出截断上限 |
 
 ## 接入方式（stdio）
 
 本套件当前以 **stdio**（本地进程）为接入形态：任何本机 MCP 客户端拉起 `python -m mcp_tools.<server>` 即用。
-> 远程 Streamable HTTP 网关在早期版本曾尝试，但挂载实现未打通（详见 git 历史"已知取舍"），当前**对外口径一律只宣称 stdio**。
+> 远程 Streamable HTTP 形态在早期版本验证过：把 FastMCP 子应用挂到 FastAPI 上时，Starlette 不会执行挂载子应用的 lifespan，`StreamableHTTPSessionManager` 起不来，该路径未打通。评估后认为 **stdio + 本地工具封装才是本项目的交付边界**，故收敛为两类工具、单一传输，把复杂度留给安全边界本身。
 
 ## 快速开始
 
@@ -39,7 +39,7 @@ python demo_client/mcp_call.py
 ## 简历口径（求职项目段雏形）
 
 > 独立开发"企业 MCP 工具套件"：用 FastMCP 封装只读 SQLite / 受限文件两类 Server（本机 stdio 接入），
-> 落地安全护栏（SQL 只读拦截、路径白名单防穿越），配套 11 项单测（7 项护栏/加固 + 4 项工具功能）；
+> 落地安全护栏（SQL 只读拦截、路径白名单防穿越），配套 11 项单测（8 项安全护栏 + 3 项工具功能）；
 > 提供 MCP Inspector / Claude Desktop / 自研 MCP 客户端三种消费方接入示例，验证"MCP 让工具与 Agent 解耦、可跨客户端复用"。
 
 ## 已知取舍 / 下一步

@@ -76,6 +76,24 @@ def test_files_read_and_list(tmp_path):
     assert "note.md" in glob_files(tmp_path, "*.md")
 
 
+# ---------- glob 加固回归：pattern 不允许越界 ----------
+def test_glob_traversal_rejected(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "inside.txt").write_text("ok", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("secret", encoding="utf-8")
+
+    assert "inside.txt" in glob_files(root, "*.txt")
+    out = glob_files(root, "../*.txt")
+    assert "不允许" in out
+    assert "outside" not in out
+
+
+def test_glob_absolute_pattern_rejected(tmp_path):
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    assert "不允许" in glob_files(tmp_path, str(tmp_path / "*.txt"))
+
+
 # ---------- 加固回归：union 词边界 / 表名注入 ----------
 def test_sql_union_word_boundary_not_substring():
     # 含 union 子串的字符串不应被误拦

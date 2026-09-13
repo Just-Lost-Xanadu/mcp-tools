@@ -3,8 +3,8 @@
 两个 server（sqlite_ro / files_safe）内部都复用这里的校验函数，保证"安全逻辑只写一份、
 任何人/任何场景都走同一闸口"。
 
-原则：宁可拒绝、不可放行。所有校验失败都抛 ValueError，由工具层转成错误文本返回给
-模型（工具错误也要"看得见"，便于模型自纠或如实告知）。
+原则：宁可拒绝、不可放行。本模块的校验失败一律抛 ValueError；工具层对"越界/非法输入"
+返回错误文本、对 DB/IO 异常则向上抛出（v1 未做统一错误包裹，见 README 已知取舍）。
 
 【设计说明：为何用模块函数而不是 class？】
 本项目刻意保持小：两处安全校验彼此无共享状态、无生命周期，模块顶层函数是"最简组合"。
@@ -62,7 +62,7 @@ def validate_readonly_sql(sql: str) -> str:
 def resolve_within_root(path: str, root: Path) -> Path:
     """把传入的相对/绝对路径，realpath 归一化后确保落在白名单根目录内（防目录穿越）。
 
-    被调用方：files_safe 的 list_dir / read_file / glob_files 三处工具入口，第一步都过这里。
+    被调用方：files_safe 的 list_dir / read_file（入口第一步）与 glob_files（每个命中），
     处理：绝对路径直接用；相对路径视为"相对 root"解析；随后 .resolve() 跟掉 .. 与符号链接，
     只剩真路径再判归属。
 
