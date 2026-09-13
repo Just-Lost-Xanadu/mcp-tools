@@ -22,7 +22,6 @@ SQLite 只读由三层共同保证：
 """
 
 import os
-import re
 import sqlite3
 from pathlib import Path
 
@@ -73,27 +72,24 @@ def list_tables(db_path: str) -> str:
     return "\n".join(r[0] for r in rows) or "（空库）"
 
 
-_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
 def describe_table(db_path: str, table: str) -> str:
     """查看某表结构：列名/类型/是否可空/主键(用 PRAGMA table_info)。
 
-    - PRAGMA 名字是拼进 SQL 的，因此 table 必须先过 _IDENTIFIER 白名单正则（只允许 [A-Za-z0-9_]
-      组成的标识符），杜绝把任意字符串拼进 PRAGMA —— 这是"表名注入"的闸口；
-    - 先查 sqlite_master 确认表真实存在，不存在返回纯校验错误文本（不抛异常，走正常返回，
-      模型能读到"表不存在"而自行纠错）。
+    - 先用**绑定参数**在 sqlite_master 里查真实表名，查不到直接返回"表不存在"；
+    - PRAGMA 的表名需要拼进 SQL，所以拼进去的是"从 sqlite_master 取回的真实表名"，
+      并按 SQLite 标识符规则把双引号双写转义 —— 注入面在绑定查询那一步就被切断；
+    - 刻意不用 ASCII 正则限制表名：那会导致 list_tables 能列出的中文表名
+      （如 `订单`）在 describe_table 里被误报"表不存在"。
     """
-    if not _IDENTIFIER.fullmatch(table):
-        return f"表不存在：{table}"
     conn = _connect(Path(db_path))
     try:
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
         ).fetchone()
-        if exists is None:
+        if row is None:
             return f"表不存在：{table}"
-        rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        quoted = str(row[0]).replace('"', '""')
+        rows = conn.execute(f'PRAGMA table_info("{quoted}")').fetchall()
     finally:
         conn.close()
     if not rows:

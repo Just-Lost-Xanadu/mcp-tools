@@ -24,7 +24,7 @@ pip install -e ".[dev]"
 python scripts/make_demo_db.py                     # 生成演示库 demo.db
 
 # ① stdio 本机使用：在 MCP Inspector / Claude Desktop 里加载
-#    configs/mcp_inspector.json（cwd 指向仓库根）
+#    configs/mcp_inspector.json（内含 command/cwd/env，均为本机绝对路径，换机器需改）
 # ② 命令行自验（标准 MCP 客户端，无任何业务耦合）：
 python demo_client/mcp_call.py
 ```

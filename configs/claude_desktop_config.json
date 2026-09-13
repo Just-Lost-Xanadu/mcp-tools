@@ -1,8 +1,21 @@
 {
+  "_说明": "把 mcpServers 整段并入 Claude Desktop 的 claude_desktop_config.json 后重启。command/cwd/env 是**本机绝对路径**，换机器需改这三处；也必须指向装了本包的 .venv 解释器（裸 python 通常 import 不到 mcp_tools）。",
   "mcpServers": {
     "sqlite-ro": {
-      "command": "python",
-      "args": ["-m", "mcp_tools.sqlite_ro"]
+      "command": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "mcp_tools.sqlite_ro"],
+      "cwd": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2",
+      "env": {
+        "MCP_SQLITE_DB": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2\\demo.db"
+      }
+    },
+    "files-safe": {
+      "command": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "mcp_tools.files_safe"],
+      "cwd": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2",
+      "env": {
+        "MCP_FILES_ROOT": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2"
+      }
     }
   }
 }

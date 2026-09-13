@@ -108,3 +108,17 @@ def test_sql_union_word_boundary_not_substring():
 def test_describe_table_rejects_non_identifier(demo_db):
     out = describe_table(demo_db, 'regions" ; DROP TABLE regions; --')
     assert "表不存在" in out
+
+
+def test_describe_table_supports_non_ascii_name(tmp_path):
+    """中文表名：list_tables 能列出，describe_table 也必须能描述（此前被 ASCII 正则误拒）。"""
+    db = tmp_path / "cn.db"
+    conn = sqlite3.connect(db)
+    conn.executescript('CREATE TABLE "订单"(id INTEGER PRIMARY KEY, 金额 REAL);')
+    conn.commit()
+    conn.close()
+
+    assert "订单" in list_tables(str(db))
+    out = describe_table(str(db), "订单")
+    assert "表不存在" not in out
+    assert "金额" in out

@@ -1,14 +1,21 @@
 {
+  "_说明": "MCP Inspector 的 server 配置（也可粘进 Claude Desktop）。cwd/command/env 都是**本机绝对路径**：cwd 必须指向仓库根（否则 MCP_SQLITE_DB/MCP_FILES_ROOT 落到别处），command 必须是装了本包的 .venv 解释器。",
   "mcpServers": {
     "sqlite-ro": {
-      "command": "python",
+      "command": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2\\.venv\\Scripts\\python.exe",
       "args": ["-m", "mcp_tools.sqlite_ro"],
-      "cwd": ".."
+      "cwd": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2",
+      "env": {
+        "MCP_SQLITE_DB": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2\\demo.db"
+      }
     },
     "files-safe": {
-      "command": "python",
+      "command": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2\\.venv\\Scripts\\python.exe",
       "args": ["-m", "mcp_tools.files_safe"],
-      "cwd": ".."
+      "cwd": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2",
+      "env": {
+        "MCP_FILES_ROOT": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2"
+      }
     }
   }
 }
