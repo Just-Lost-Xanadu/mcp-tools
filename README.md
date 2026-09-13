@@ -39,7 +39,7 @@ python demo_client/mcp_call.py
 ## 简历口径（求职项目段雏形）
 
 > 独立开发"企业 MCP 工具套件"：用 FastMCP 封装只读 SQLite / 受限文件两类 Server（本机 stdio 接入），
-> 落地安全护栏（SQL 只读拦截、路径白名单防穿越），配套 11 项单测（8 项安全护栏 + 3 项工具功能）；
+> 落地安全护栏（SQL 只读拦截、路径白名单防穿越），配套 14 项单测（10 项安全护栏 + 4 项工具功能）；
 > 提供 MCP Inspector / Claude Desktop / 自研 MCP 客户端三种消费方接入示例，验证"MCP 让工具与 Agent 解耦、可跨客户端复用"。
 
 ## 已知取舍 / 下一步
