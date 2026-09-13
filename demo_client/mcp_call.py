@@ -10,7 +10,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+# 包在 src/ 下（src-layout），未安装时要把 src 放进来才 import 得到 mcp_tools
+sys.path.insert(0, str(ROOT / "src"))
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -33,6 +34,8 @@ async def main() -> None:
                 {"sql": "SELECT r.name AS region, SUM(o.amount) AS sales FROM orders o "
                         "JOIN regions r ON r.id = o.region_id GROUP BY r.name ORDER BY sales DESC"},
             )
+            if result.isError:  # 不看这个标志的话，工具报错也会被当成查询结果打印出来
+                raise SystemExit(f"工具调用失败：{[getattr(c, 'text', c) for c in result.content]}")
             for item in result.content:
                 print("查询结果:\n", item.text)
 

@@ -4,7 +4,7 @@
 任何人/任何场景都走同一闸口"。
 
 原则：宁可拒绝、不可放行。本模块的校验失败一律抛 ValueError；工具层对"越界/非法输入"
-返回错误文本、对 DB/IO 异常则向上抛出（v1 未做统一错误包裹，见 README 已知取舍）。
+返回错误文本、对 DB/IO 异常则向上抛出（v1 未做统一错误包裹，DB/IO 异常会直接冒泡成 MCP 错误）。
 
 【设计说明：为何用模块函数而不是 class？】
 本项目刻意保持小：两处安全校验彼此无共享状态、无生命周期，模块顶层函数是"最简组合"。
@@ -43,11 +43,14 @@ def validate_readonly_sql(sql: str) -> str:
       （如 communication、reunion）；真正的写库由"只读 URI + query_only"双保险兜底。
     - describe/pragma 属于查询前辅助（describe_table 内部用 PRAGMA table_info），
       写入类 PRAGMA 由 _SQL_PRAGMA_WRITE 单独拦截，最终写库由 DB 层只读兜底。
+    - 这是"粗筛"而不是语法解析：`WITH x AS (SELECT 1) DELETE FROM t` 能通过本闸
+      （SQLite 允许数据修改型 CTE），`PRAGMA query_only=OFF`、`SELECT load_extension(...)`
+      也能通过。真正兜住写操作的是 sqlite_ro 的 mode=ro 只读连接 + query_only。
     """
     if not sql or not isinstance(sql, str):
         raise ValueError("SQL 不能为空")
     if not _SQL_HEAD.match(sql):
-        raise ValueError("仅允许 SELECT/WITH/EXPLAIN 只读查询")
+        raise ValueError("仅允许以 SELECT/WITH/EXPLAIN/PRAGMA 开头的单条只读查询")
     lowered = sql.lower()
     for token in _SQL_BLOCK:
         if token in lowered:

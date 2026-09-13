@@ -1,10 +1,12 @@
 """MCP Server：只读 SQLite 查询。
 
 对外以 FastMCP 暴露三个工具：list_tables_tool / describe_table_tool / query_sql_tool。
-SQLite 只读由三层共同保证：
+SQLite 只读由三层共同保证（第 1 层才是真正的保证，第 2 层只是粗筛）：
   1) defense in depth（纵深）：DB 打开即用「只读 URI mode=ro」+ `PRAGMA query_only=ON`，
      即使 SQL 层校验漏了，数据库本身也不接受写；
-  2) 应用层再叠加 validate_readonly_sql：只允许 SELECT/WITH/EXPLAIN，拦多语句/注释/注入特征；
+  2) 应用层再叠加 validate_readonly_sql：放行以 SELECT/WITH/EXPLAIN/PRAGMA 开头的单条语句，
+     拦多语句/注释/UNION。注意它只是粗筛——`WITH x AS (SELECT 1) DELETE FROM t` 能过文本闸
+     （SQLite 允许数据修改型 CTE），兜住它的是第 1 层；
   3) 结果行数上限，防止结果集过大；语句执行级超时未实现，不对外宣称。
 
 【OOP 说明】本模块主体是函数（_connect/_rows_to_text/各查询函数），FastMCP 的 @mcp.tool
@@ -84,7 +86,10 @@ def describe_table(db_path: str, table: str) -> str:
     conn = _connect(Path(db_path))
     try:
         row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            # COLLATE NOCASE：SQLite 自身对表名大小写不敏感（PRAGMA/SELECT 都认 REGIONS），
+            # 这里若用默认 BINARY 比较，会出现"表能查、却 describe 不了"的错误答案
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=? COLLATE NOCASE",
+            (table,),
         ).fetchone()
         if row is None:
             return f"表不存在：{table}"
@@ -127,7 +132,16 @@ def query_sql(db_path: str, sql: str) -> str:
 
 
 def create_server(db_path: str | None = None) -> FastMCP:
-    db_path = db_path or os.getenv("MCP_SQLITE_DB", str(Path.cwd() / "demo.db"))
+    resolved = Path(
+        db_path or os.getenv("MCP_SQLITE_DB", str(Path.cwd() / "demo.db"))
+    ).resolve()
+    # 与 files_safe.create_server 一致：启动即校验，避免"看起来连上了、每次调用都报错"。
+    # 尤其 demo.db 被 .gitignore 忽略，新克隆下来必须先生成，否则配置一加载就是坏的。
+    if not resolved.is_file():
+        raise FileNotFoundError(
+            f"数据库不存在：{resolved}（请先运行 python scripts/make_demo_db.py）"
+        )
+    db_path = str(resolved)
     mcp = FastMCP("sqlite-ro")
 
     @mcp.tool()
@@ -142,7 +156,7 @@ def create_server(db_path: str | None = None) -> FastMCP:
 
     @mcp.tool()
     def query_sql_tool(sql: str) -> str:
-        """执行一条只读 SQL（仅 SELECT/WITH/EXPLAIN），返回表格文本，最多 200 行。"""
+        """执行一条只读查询（以 SELECT/WITH/EXPLAIN/PRAGMA 开头的单条语句），返回表格文本，最多 200 行。"""
         return query_sql(db_path, sql)
 
     return mcp

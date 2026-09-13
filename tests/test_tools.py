@@ -122,3 +122,8 @@ def test_describe_table_supports_non_ascii_name(tmp_path):
     out = describe_table(str(db), "订单")
     assert "表不存在" not in out
     assert "金额" in out
+
+
+def test_describe_table_name_is_case_insensitive(demo_db):
+    """SQLite 对表名大小写不敏感（SELECT/PRAGMA 都认 REGIONS），describe 也必须一致。"""
+    assert "name" in describe_table(demo_db, "REGIONS")
