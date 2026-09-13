@@ -12,13 +12,13 @@
 
 ## 接入方式（stdio）
 
-本套件当前以 **stdio**（本地进程）为接入形态：任何本机 MCP 客户端拉起 `python -m mcp_tools.<server>` 即用。
-> 远程 Streamable HTTP 形态在早期版本验证过：把 FastMCP 子应用挂到 FastAPI 上时，Starlette 不会执行挂载子应用的 lifespan，`StreamableHTTPSessionManager` 起不来，该路径未打通。评估后认为 **stdio + 本地工具封装才是本项目的交付边界**，故收敛为两类工具、单一传输，把复杂度留给安全边界本身。
+本套件以 **stdio**（本地进程）为接入形态：任何本机 MCP 客户端拉起 `python -m mcp_tools.<server>` 即用。
+单一传输、两类工具是刻意的收敛——把复杂度留给安全边界本身。
 
 ## 快速开始
 
 ```bash
-cd mcp-tools
+cd opencode_2                                       # 仓库根（项目/包名是 mcp-tools）
 python -m venv .venv && .venv\Scripts\activate     # Windows
 pip install -e ".[dev]"
 python scripts/make_demo_db.py                     # 生成演示库 demo.db
@@ -44,8 +44,7 @@ python demo_client/mcp_call.py
 
 ## 已知取舍 / 下一步
 
-- 早期版本尝试过三类（含 HTML 抓取/SSRF 防护）与远程 Streamable HTTP 网关，因保持项目小而聚焦已移除；当前只保留最稳的两类、只做 stdio——被问"为什么只两类"可答"聚焦能讲透的工程子集"。
-- 鉴权若需远程访问，可演进为独立鉴权层 + 反代；当前 demo 不需。
+- 只保留"只读 SQLite + 受限文件"两类最稳的工具、只做 stdio：被问"为什么只两类"可答"聚焦能讲透的工程子集"；更多工具类目属于后续扩展方向，不写进"已完成"。
 - 下一步方向：动态工具注册 / 集成到一号项目作为其 MCP 工具源，暂不实现。
 
 ## 常见坑
