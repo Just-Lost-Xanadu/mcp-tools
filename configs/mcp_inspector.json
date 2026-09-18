@@ -1,20 +1,26 @@
 {
-  "_说明": "MCP Inspector 的 server 配置（也可粘进 Claude Desktop）。cwd/command/env 都是**本机绝对路径**：cwd 必须指向仓库根（否则 MCP_SQLITE_DB/MCP_FILES_ROOT 落到别处），command 必须是装了本包的 .venv 解释器。",
+  "_说明": "MCP Inspector 的 server 配置（也可粘进 Claude Desktop）。本文件由 scripts/gen_configs.py 生成：cwd 必须指向仓库根，command 必须是装了本包的 .venv 解释器。换目录/换机器后重跑一次生成脚本即可。",
   "mcpServers": {
     "sqlite-ro": {
       "command": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "mcp_tools.sqlite_ro"],
-      "cwd": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2",
+      "cwd": "C:/Users/virahalx/Desktop/JL/opencode_2",
+      "args": [
+        "-m",
+        "mcp_tools.sqlite_ro"
+      ],
       "env": {
-        "MCP_SQLITE_DB": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2\\demo.db"
+        "MCP_SQLITE_DB": "C:/Users/virahalx/Desktop/JL/opencode_2/demo.db"
       }
     },
     "files-safe": {
       "command": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "mcp_tools.files_safe"],
-      "cwd": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2",
+      "cwd": "C:/Users/virahalx/Desktop/JL/opencode_2",
+      "args": [
+        "-m",
+        "mcp_tools.files_safe"
+      ],
       "env": {
-        "MCP_FILES_ROOT": "C:\\Users\\virahalx\\Desktop\\JL\\opencode_2"
+        "MCP_FILES_ROOT": "C:/Users/virahalx/Desktop/JL/opencode_2"
       }
     }
   }
