@@ -37,6 +37,7 @@ from mcp.server.fastmcp import FastMCP
 from .security import validate_readonly_sql
 
 MAX_ROWS = 200
+MAX_TABLES = 200   # list_tables 结果上限，与 query_sql 的行数上限保持一致的收敛口径
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -51,6 +52,9 @@ def _connect(db_path: Path) -> sqlite3.Connection:
         raise FileNotFoundError(f"数据库不存在：{db_path}（先运行 scripts/make_demo_db.py）")
     uri = f"{db_path.resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    # busy_timeout 放在 query_only 之前：只读连接同样会撞上 SQLITE_BUSY
+    # （别的进程正在写、或有未提交事务），不设超时就直接抛 "database is locked"。
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA query_only = ON")
     # 第三道：显式关闭扩展加载。`SELECT load_extension('...')` 能过 SQL 文本闸，
     # 而它一旦可用就能加载任意 .dll/.so 绕过一切 SQL 层限制。
@@ -71,18 +75,29 @@ def _rows_to_text(columns: list[str], rows: list[tuple], truncated: bool) -> str
 
 
 def list_tables(db_path: str) -> str:
-    """返回业务表名（按字母序，每行一个）。
+    """返回业务表名（按字母序，每行一个），超过 MAX_TABLES 即截断。
 
     排除 sqlite 内部表（NOT LIKE 'sqlite_%'）：对模型暴露的就是"干净的可查表清单"。
+    截断上限是为了和 query_sql/glob 的口径一致——这段文本会整段进模型上下文，
+    一个上千张表的库足以把上下文挤爆（此前只有 query_sql 和 glob 有上限）。
     """
     conn = _connect(Path(db_path))
     try:
         rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+            "ORDER BY name LIMIT ?",
+            (MAX_TABLES + 1,),
         ).fetchall()
     finally:
         conn.close()
-    return "\n".join(r[0] for r in rows) or "（空库）"
+    if not rows:
+        return "（空库）"
+    truncated = len(rows) > MAX_TABLES
+    names = [r[0] for r in rows[:MAX_TABLES]]
+    text = "\n".join(names)
+    if truncated:
+        text += f"\n...（表过多，仅显示前 {MAX_TABLES} 张）"
+    return text
 
 
 def describe_table(db_path: str, table: str) -> str:

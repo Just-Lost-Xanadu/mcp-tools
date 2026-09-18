@@ -127,3 +127,58 @@ def test_describe_table_supports_non_ascii_name(tmp_path):
 def test_describe_table_name_is_case_insensitive(demo_db):
     """SQLite 对表名大小写不敏感（SELECT/PRAGMA 都认 REGIONS），describe 也必须一致。"""
     assert "name" in describe_table(demo_db, "REGIONS")
+
+
+# ---------- 资源上限回归：输出都要有收敛口径 ----------
+def test_list_dir_truncates_many_entries(tmp_path, monkeypatch):
+    """目录条目过多必须截断——这段文本会整段进模型上下文。"""
+    from mcp_tools import files_safe
+
+    monkeypatch.setattr(files_safe, "MAX_LIST_ENTRIES", 3)
+    for i in range(6):
+        (tmp_path / f"f{i}.txt").write_text("x", encoding="utf-8")
+
+    out = files_safe.list_dir(tmp_path)
+    assert "条目过多" in out
+    assert len([ln for ln in out.splitlines() if ln.endswith(".txt")]) == 3
+
+
+def test_read_file_truncates_without_slurping_whole_file(tmp_path, monkeypatch):
+    """只从流里读上限+1 个字符，而不是"整读再截断"（后者对大文件没有资源保护）。"""
+    from mcp_tools import files_safe
+
+    monkeypatch.setattr(files_safe, "MAX_READ_CHARS", 10)
+    (tmp_path / "big.txt").write_text("A" * 5000, encoding="utf-8")
+
+    out = files_safe.read_file(tmp_path, "big.txt")
+    assert out.startswith("A" * 10)
+    assert "已截断" in out
+    # 关键断言：返回值只比上限多一点（含提示语），不是把 5000 字符全读出来再切
+    assert len(out) < 100
+
+
+def test_list_tables_truncates(tmp_path, monkeypatch):
+    from mcp_tools import sqlite_ro
+
+    monkeypatch.setattr(sqlite_ro, "MAX_TABLES", 3)
+    db = tmp_path / "many.db"
+    conn = sqlite3.connect(db)
+    for i in range(6):
+        conn.execute(f"CREATE TABLE t{i}(a)")
+    conn.commit()
+    conn.close()
+
+    out = sqlite_ro.list_tables(str(db))
+    assert "表过多" in out
+    assert len([ln for ln in out.splitlines() if ln.startswith("t")]) == 3
+
+
+def test_connect_sets_busy_timeout(demo_db):
+    """只读连接也要设 busy_timeout，否则撞上别的写事务会直接 'database is locked'。"""
+    from mcp_tools import sqlite_ro
+
+    conn = sqlite_ro._connect(Path(demo_db))
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        conn.close()

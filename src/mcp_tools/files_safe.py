@@ -31,28 +31,42 @@ from mcp.server.fastmcp import FastMCP
 
 from .security import resolve_within_root
 
-MAX_READ_CHARS = 200_000  # 单文件最大读取字符；超过即截断（不是先整读再截断的"体积预算"，v1 简化）
+MAX_READ_CHARS = 200_000  # 单次读取上限（字符）；按流读取，不会先把整个文件读进内存
+MAX_LIST_ENTRIES = 200    # list_dir 结果上限；与 glob/query 的行数上限保持一致的收敛口径
 
 
 def list_dir(root: Path, relative_dir: str = ".") -> str:
-    """列出 root 下某相对目录的内容（条目名，目录带尾 /）。"""
+    """列出 root 下某相对目录的内容（条目名，目录带尾 /）。
+
+    超过 MAX_LIST_ENTRIES 即截断：`list_dir` 的输出会整段进模型上下文，
+    一个上万条目的目录足以把上下文挤爆（glob 早有 200 上限，这里此前是个缺口）。
+    """
     target = resolve_within_root(relative_dir, root)
     if not target.is_dir():
         return f"不是目录：{relative_dir}"
     items = sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())
-    return "\n".join(items) or "（空目录）"
+    if not items:
+        return "（空目录）"
+    if len(items) > MAX_LIST_ENTRIES:
+        return "\n".join(items[:MAX_LIST_ENTRIES]) + (
+            f"\n...（条目过多，仅显示前 {MAX_LIST_ENTRIES} 个，请指明更具体的子目录）"
+        )
+    return "\n".join(items)
 
 
 def read_file(root: Path, relative_path: str) -> str:
     """读取 root 白名单内某文件的 UTF-8 文本，超过 MAX_READ_CHARS 字符即截断标记。
 
-    先 resolve_within_root（越界直接 ValueError），再 is_file 校验，然后整读+按字符截断；
-    读取前不做字节级体积预算（v1 简化），超大二进制文件不在工具设计目标内。
+    先 resolve_within_root（越界直接 ValueError），再 is_file 校验。
+    **只从流里读 MAX_READ_CHARS+1 个字符**，而不是"整读再截断"——后者虽然返回值有上限，
+    但对一个几 GB 的文件仍会先把它整个读进内存，等于没有资源保护（而本项目的定位正是安全边界）。
+    多读 1 个字符只为判断"是否被截断"。
     """
     target = resolve_within_root(relative_path, root)
     if not target.is_file():
         return f"不是文件：{relative_path}"
-    text = target.read_text(encoding="utf-8", errors="replace")
+    with target.open("r", encoding="utf-8", errors="replace") as fh:
+        text = fh.read(MAX_READ_CHARS + 1)
     if len(text) > MAX_READ_CHARS:
         text = text[:MAX_READ_CHARS] + f"\n...（内容过长，已截断前 {MAX_READ_CHARS} 字符）"
     return text

@@ -11,8 +11,8 @@
 
 | Server | 工具 | 安全设计 |
 |---|---|---|
-| `sqlite-ro` 只读 SQLite | `list_tables_tool` / `describe_table_tool` / `query_sql_tool` | 三层"硬度不同"，别当成等价三层：**只有只读 URI(`mode=ro`) 是不可被 SQL 解除的硬保证**；`PRAGMA query_only=ON` 只是纵深——**它能被一条通过文本闸的 `PRAGMA query_only=OFF` 带内关掉**（已实测）；`enable_load_extension(False)` 显式关闭扩展加载，堵住能过文本闸的 `SELECT load_extension(...)`（实测报 `not authorized`）。文本闸只做粗筛（放行 SELECT/WITH/EXPLAIN/PRAGMA 开头、拦多语句/注释/UNION，已知可被 `WITH … DELETE` 绕过）；结果 ≤200 行，且用 `fetchmany` 取，超大结果集不会一次性进内存 |
-| `files-safe` 受限文件 | `list_dir_tool` / `read_file_tool` / `glob_files_tool` | 白名单根目录：三个入口都过 realpath 校验（`glob` 另拒绝对路径与 `..` pattern），越界即拒（防目录穿越）；读文件有输出截断上限（20 万字符） |
+| `sqlite-ro` 只读 SQLite | `list_tables_tool` / `describe_table_tool` / `query_sql_tool` | 三层"硬度不同"，别当成等价三层：**只有只读 URI(`mode=ro`) 是不可被 SQL 解除的硬保证**；`PRAGMA query_only=ON` 只是纵深——**它能被一条通过文本闸的 `PRAGMA query_only=OFF` 带内关掉**（已实测）；`enable_load_extension(False)` 显式关闭扩展加载，堵住能过文本闸的 `SELECT load_extension(...)`（实测报 `not authorized`）。文本闸只做粗筛（放行 SELECT/WITH/EXPLAIN/PRAGMA 开头、拦多语句/注释/UNION，已知可被 `WITH … DELETE` 绕过）；结果 ≤200 行、`list_tables` ≤200 张，且查询用 `fetchmany` 取，超大结果集不会一次性进内存；连接设 `busy_timeout=5000`，避免撞上别的写事务时直接报 `database is locked` |
+| `files-safe` 受限文件 | `list_dir_tool` / `read_file_tool` / `glob_files_tool` | 白名单根目录：三个入口都过 realpath 校验（`glob` 另拒绝对路径与 `..` pattern），越界即拒（防目录穿越）；**三种输出都有收敛上限**——`read_file` 只从流里读前 20 万字符（不是整读再截断）、`list_dir` 与 `glob` 各上限 200 条 |
 
 ## 接入方式（stdio）
 
