@@ -5,13 +5,13 @@
 > **与姊妹项目 `kbase-agent` 的关系**：两者是**一个系统的两层**，不是同一个项目做两遍。
 > `kbase-agent` 是**编排层**（Agent 决策/检索/状态/评测），它把自己的工具用 FastMCP 写在进程内、经 stdio 子进程接入；
 > 本套件是**协议层**——刻意换成数据/文件域、只保留 stdio，验证"MCP 让工具与 Agent 解耦、可跨客户端复用"这件事本身。
-> 面试口径：**编排 + 协议分层**；本套件的价值在"安全边界与可交付性"，不在工具数量。
+> 定位：**编排 + 协议分层**；本套件的价值在"安全边界与可交付性"，不在工具数量。
 
 ## 工具域与安全边界
 
 | Server | 工具 | 安全设计 |
 |---|---|---|
-| `sqlite-ro` 只读 SQLite | `list_tables_tool` / `describe_table_tool` / `query_sql_tool` | 真正的只读保证是 **只读 URI(mode=ro) + PRAGMA query_only**（两层都在 DB 层）；文本闸只做粗筛（放 SELECT/WITH/EXPLAIN/PRAGMA 开头、拦多语句/注释/UNION，已知可被 `WITH … DELETE` 绕过）；结果 ≤200 行 |
+| `sqlite-ro` 只读 SQLite | `list_tables_tool` / `describe_table_tool` / `query_sql_tool` | 三层"硬度不同"，别当成等价三层：**只有只读 URI(`mode=ro`) 是不可被 SQL 解除的硬保证**；`PRAGMA query_only=ON` 只是纵深——**它能被一条通过文本闸的 `PRAGMA query_only=OFF` 带内关掉**（已实测）；`enable_load_extension(False)` 显式关闭扩展加载，堵住能过文本闸的 `SELECT load_extension(...)`（实测报 `not authorized`）。文本闸只做粗筛（放行 SELECT/WITH/EXPLAIN/PRAGMA 开头、拦多语句/注释/UNION，已知可被 `WITH … DELETE` 绕过）；结果 ≤200 行，且用 `fetchmany` 取，超大结果集不会一次性进内存 |
 | `files-safe` 受限文件 | `list_dir_tool` / `read_file_tool` / `glob_files_tool` | 白名单根目录：三个入口都过 realpath 校验（`glob` 另拒绝对路径与 `..` pattern），越界即拒（防目录穿越）；读文件有输出截断上限（20 万字符） |
 
 ## 接入方式（stdio）
@@ -59,21 +59,16 @@ requirements.lock      # 已验证可跑的依赖组合（实测 mcp 1.30.0，Py
 3. **自研 Agent**：`demo_client/mcp_call.py` 走标准协议调用——证明"工具与消费方解耦、可跨客户端复用"（脚本会检查 `isError`，工具报错不会被当成查询结果打印）。
 4. 安全单测：`pytest tests`（**15 passed**：SQL 注入/多语句被拦、目录穿越被拒、中文表名与大小写回归等）。
 
-## 简历口径（求职项目段雏形）
-
-> 独立开发"企业 MCP 工具套件"：用 FastMCP 封装只读 SQLite / 受限文件两类 Server（本机 stdio 接入），
-> 落地安全护栏（SQL 只读拦截、路径白名单防穿越），配套 15 项单测（覆盖只读/穿越拦截与中文表名、大小写等边界回归）；
-> 提供 MCP Inspector / Claude Desktop / 自研 MCP 客户端三种消费方接入示例，验证"MCP 让工具与 Agent 解耦、可跨客户端复用"。
-
-> **与一号项目并列时别被读成"重复项目"**：简历里建议把两者写成"编排层 / 协议层"的分层关系
-> （见本文件顶部），或只留一段并注明"其中的 MCP 工具层已抽成独立可交付 Server"。**不要**让两段的
-> 技术栈（MCP + FastAPI + SQLite）看起来是同一种项目写了两遍。
-
 ## 已知取舍 / 下一步
 
-- 只保留"只读 SQLite + 受限文件"两类最稳的工具、只做 stdio：被问"为什么只两类"可答"聚焦能讲透的工程子集"；更多工具类目属于后续扩展方向，不写进"已完成"。
-- **SQL 安全是三层，讲的时候别把文本闸说成保证**：文本闸只做粗筛（`WITH … DELETE`、`PRAGMA query_only=OFF`、`load_extension` 都能过），真正兜住写操作的是 `mode=ro` 只读 URI + `PRAGMA query_only=ON`；`load_extension` 属于**已知未封堵项**（生产化方向：连接层禁用扩展加载）。
+- 只保留"只读 SQLite + 受限文件"两类最稳的工具、只做 stdio：刻意收敛到能讲透的工程子集；更多工具类目属于后续扩展方向，不写进"已完成"。
+- **SQL 安全是三层，但三层"硬度"不同——别把文本闸，也别把 `query_only`，说成最终保证**：
+  - 文本闸（粗筛）：`WITH … DELETE`、`PRAGMA query_only=OFF`、`SELECT load_extension(...)` 都能过闸，它的作用是挡掉手滑与明显注入，不是安全边界；
+  - `PRAGMA query_only=ON`（纵深）：**能被一条通过文本闸的 `PRAGMA query_only=OFF` 带内关掉**（实测），所以只算"对抗意外写"；
+  - **只读 URI `mode=ro`（硬保证）**：SQLite 在文件层拒绝写，实测 `WITH x AS (SELECT 1) DELETE FROM t` 到这里报 `attempt to write a readonly database`。这是唯一无法被 SQL 语句解除的一层；
+  - 扩展加载已显式关闭（`conn.enable_load_extension(False)`）：实测 `SELECT load_extension('evil')` 报 `not authorized`。Python `sqlite3` 默认即关闭，这里显式声明是为了不依赖解释器默认值。
 - 语句执行级超时未实现（只有结果行数上限 200），不对外宣称。
+- 只读是"文件级"的：`mode=ro` 保护的是**被打开的那个库文件**；不做 SQL 语义级白名单（例如某张表本不该给模型看），也不做按调用方的行级/列级过滤。
 - 下一步方向：动态工具注册 / 集成到一号项目作为其 MCP 工具源，暂不实现。
 
 ## 常见坑

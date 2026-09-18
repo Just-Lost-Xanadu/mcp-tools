@@ -1,13 +1,18 @@
 """MCP Server：只读 SQLite 查询。
 
 对外以 FastMCP 暴露三个工具：list_tables_tool / describe_table_tool / query_sql_tool。
-SQLite 只读由三层共同保证（第 1 层才是真正的保证，第 2 层只是粗筛）：
-  1) defense in depth（纵深）：DB 打开即用「只读 URI mode=ro」+ `PRAGMA query_only=ON`，
-     即使 SQL 层校验漏了，数据库本身也不接受写；
-  2) 应用层再叠加 validate_readonly_sql：放行以 SELECT/WITH/EXPLAIN/PRAGMA 开头的单条语句，
-     拦多语句/注释/UNION。注意它只是粗筛——`WITH x AS (SELECT 1) DELETE FROM t` 能过文本闸
-     （SQLite 允许数据修改型 CTE），兜住它的是第 1 层；
-  3) 结果行数上限，防止结果集过大；语句执行级超时未实现，不对外宣称。
+SQLite 只读由三层共同保证，但三层的"硬度"并不相同（这个区分要能讲准，别把三层说成等价）：
+  1) **只读 URI `?mode=ro`（唯一的硬保证）**：由 SQLite 在文件层拒绝写，
+     `WITH x AS (SELECT 1) DELETE FROM t` 这类绕过文本闸的语句到这里会被
+     "attempt to write a readonly database" 拦下（已实测）。它无法被 SQL 语句解除。
+  2) `PRAGMA query_only=ON` + 显式 `enable_load_extension(False)`（纵深，可被带内削弱）：
+     query_only 是连接级开关，**能被一条通过文本闸的 `PRAGMA query_only=OFF` 关掉**（已实测），
+     所以它只算"对抗意外写"的第二道，而不是"对抗对抗性输入"的保证；
+     `SELECT load_extension(...)` 能过文本闸，靠 `enable_load_extension(False)` 拒绝（实测报 not authorized）。
+  3) 应用层再叠加 validate_readonly_sql：放行以 SELECT/WITH/EXPLAIN/PRAGMA 开头的单条语句，
+     拦多语句/注释/UNION。它只是**粗筛**——见 security.validate_readonly_sql 的已知绕过清单。
+  另有：结果行数上限（MAX_ROWS=200，用 fetchmany 而非 fetchall，超大结果集不会一次性进内存）；
+  语句执行级超时**未实现**，不对外宣称。
 
 【OOP 说明】本模块主体是函数（_connect/_rows_to_text/各查询函数），FastMCP 的 @mcp.tool
 装饰把它们"变成工具"。真正需要一个"类"的是当你想对同一份代码同时服务多个不同 db 连接
@@ -47,6 +52,12 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     uri = f"{db_path.resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
     conn.execute("PRAGMA query_only = ON")
+    # 第三道：显式关闭扩展加载。`SELECT load_extension('...')` 能过 SQL 文本闸，
+    # 而它一旦可用就能加载任意 .dll/.so 绕过一切 SQL 层限制。
+    # Python 的 sqlite3 默认就是关闭的（实测该语句会报 "not authorized"），
+    # 这里显式声明一次，是为了让这条防线"有意为之"，而不是依赖解释器默认值——
+    # 换解释器/换包装库/未来版本改默认时不会静默失效。
+    conn.enable_load_extension(False)
     return conn
 
 
