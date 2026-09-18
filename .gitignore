@@ -6,8 +6,14 @@ venv/
 *.egg-info/
 .pytest_cache/
 
-# 数据与密钥
+# 数据与演示库（demo.db 由 scripts/make_demo_db.py 生成，不入库）
 .env
+.env.*
 *.db
 *.sqlite
 data/
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
