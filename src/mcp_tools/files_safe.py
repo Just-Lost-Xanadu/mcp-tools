@@ -89,7 +89,10 @@ def glob_files(root: Path, pattern: str) -> str:
     if not pattern:
         return "（pattern 不能为空）"
     raw = Path(pattern)
-    if raw.is_absolute() or ".." in raw.parts:
+    # Windows 上 `is_absolute()` 只认"带盘符"的路径：`/Windows/*.ini`、`\Windows\*.ini`
+    # 这类 **rooted**（有根无盘符）pattern 它会返回 False，于是漏过闸门、由 pathlib
+    # 在 rglob 时抛 NotImplementedError。所以这里连 drive/root 一起判，让拒绝发生在闸门内。
+    if raw.is_absolute() or raw.drive or raw.root or ".." in raw.parts:
         return "（pattern 不允许绝对路径或 .. ）"
     root = root.resolve()
     hits: list[str] = []

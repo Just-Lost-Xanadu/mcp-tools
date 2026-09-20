@@ -1,7 +1,7 @@
 """MCP Server：只读 SQLite 查询。
 
 对外以 FastMCP 暴露三个工具：list_tables_tool / describe_table_tool / query_sql_tool。
-SQLite 只读由三层共同保证，但三层的"硬度"并不相同（这个区分要能讲准，别把三层说成等价）：
+SQLite 只读由三层共同保证，但三层的"硬度"并不相同（三层不可当成等价，也不可混为一类）：
   1) **只读 URI `?mode=ro`（唯一的硬保证）**：由 SQLite 在文件层拒绝写，
      `WITH x AS (SELECT 1) DELETE FROM t` 这类绕过文本闸的语句到这里会被
      "attempt to write a readonly database" 拦下（已实测）。它无法被 SQL 语句解除。
@@ -38,6 +38,8 @@ from .security import validate_readonly_sql
 
 MAX_ROWS = 200
 MAX_TABLES = 200   # list_tables 结果上限，与 query_sql 的行数上限保持一致的收敛口径
+MAX_CELL_CHARS = 2000     # 单个单元格上限：行数上限约束不了"单行一个超大值"
+MAX_OUTPUT_CHARS = 20000  # 单次工具输出总上限（与 read_file 的 MAX_READ_CHARS 同属收敛口径）
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -65,12 +67,47 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _clip_cell(value) -> tuple[str, bool]:
+    """把单元格渲染成文本并做长度收敛，返回 (文本, 是否被截断)。"""
+    if value is None:
+        return "", False
+    text = value if isinstance(value, str) else str(value)
+    if len(text) > MAX_CELL_CHARS:
+        return text[:MAX_CELL_CHARS] + f"…（单元格过长，已截断前 {MAX_CELL_CHARS} 字符）", True
+    return text, False
+
+
 def _rows_to_text(columns: list[str], rows: list[tuple], truncated: bool) -> str:
-    lines = [" | ".join(str(c) for c in columns)]
+    """渲染表格文本，并对"体量"做收敛：行数上限之外，再加单元格上限与总输出上限。
+
+    为什么行数上限不够：`fetchmany(MAX_ROWS+1)` 只约束行数，单行里的一个超大值
+    （例如 `SELECT zeroblob(5000000)` 或一条超长 TEXT 列）仍会展开成上千万字符的
+    Python 字符串——既能把 server 进程的内存打爆，也会把模型上下文挤爆。
+    文件侧早有 MAX_READ_CHARS 收敛，这里把 SQL 侧的对称口径补上。
+    """
+    header, header_clipped = _clip_cell(" | ".join(str(c) for c in columns))
+    lines = [header]
+    used = len(header)
+    clipped = header_clipped
     for row in rows:
-        lines.append(" | ".join("" if v is None else str(v) for v in row))
+        rendered = []
+        for value in row:
+            cell, was_clipped = _clip_cell(value)
+            rendered.append(cell)
+            clipped = clipped or was_clipped
+        line = " | ".join(rendered)
+        if used + len(line) + 1 > MAX_OUTPUT_CHARS:
+            clipped = True
+            break
+        lines.append(line)
+        used += len(line) + 1
     if truncated:
         lines.append(f"...（仅显示前 {MAX_ROWS} 行，请用更精确的 SQL 缩小范围）")
+    if clipped:
+        lines.append(
+            f"...（结果过大已截断：单元格上限 {MAX_CELL_CHARS} 字符 / "
+            f"总输出上限 {MAX_OUTPUT_CHARS} 字符，请用更精确的 SQL 缩小范围）"
+        )
     return "\n".join(lines)
 
 

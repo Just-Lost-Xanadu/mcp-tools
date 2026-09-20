@@ -3,8 +3,11 @@
 两个 server（sqlite_ro / files_safe）内部都复用这里的校验函数，保证"安全逻辑只写一份、
 任何人/任何场景都走同一闸口"。
 
-原则：宁可拒绝、不可放行。本模块的校验失败一律抛 ValueError；工具层对"越界/非法输入"
-返回错误文本、对 DB/IO 异常则向上抛出（v1 未做统一错误包裹，DB/IO 异常会直接冒泡成 MCP 错误）。
+原则：宁可拒绝、不可放行。**本模块的校验函数一律抛 ValueError**（经 MCP 表现为 isError=true）。
+注意区分两类返回：校验失败（越界/非法输入）是抛异常；而工具函数自身发现的"非错误但无结果"
+（`不是目录：…`、`不是文件：…`、`（无匹配文件）`）是**正常文本**（isError=false）——
+消费方只看 isError 时不会把它当成失败。DB/IO 异常则向上抛出（v1 未做统一错误包裹，
+会直接冒泡成 MCP 错误）。
 
 【设计说明：为何用模块函数而不是 class？】
 本项目刻意保持小：两处安全校验彼此无共享状态、无生命周期，模块顶层函数是"最简组合"。
@@ -21,7 +24,7 @@
 import re
 from pathlib import Path
 
-_SQL_HEAD = re.compile(r"^\s*(select|with|explain|describe|pragma)\b", re.IGNORECASE)
+_SQL_HEAD = re.compile(r"^\s*(select|with|explain|pragma)\b", re.IGNORECASE)
 _SQL_UNION = re.compile(r"\bunion\b")
 _SQL_PRAGMA_WRITE = re.compile(
     r"\bpragma\s+(journal_mode|synchronous|locking_mode|wal_checkpoint|cache_size)\b",
@@ -41,8 +44,11 @@ def validate_readonly_sql(sql: str) -> str:
 
     - union 只按整词拦（\\bunion\\b），避免误伤含 union 子串的列名/字符串
       （如 communication、reunion）；真正的写库由"只读 URI + query_only"双保险兜底。
-    - describe/pragma 属于查询前辅助（describe_table 内部用 PRAGMA table_info），
-      写入类 PRAGMA 由 _SQL_PRAGMA_WRITE 单独拦截，最终写库由 DB 层只读兜底。
+    - describe/pragma 曾被一起放行，但 SQLite 并没有 DESCRIBE 语句（`describe_table`
+      走的是 PRAGMA table_info，且不经过本闸），放行它只会让这类语句在执行期报语法错误，
+      已删除；PRAGMA 保留放行，写入类 PRAGMA 由 _SQL_PRAGMA_WRITE 单独拦截
+      （黑名单不全，例如 `writable_schema=ON` 能过闸，但被 mode=ro 物理拒绝），
+      最终写库由 DB 层只读兜底。
     - 这是"粗筛"而不是语法解析：`WITH x AS (SELECT 1) DELETE FROM t` 能通过本闸
       （SQLite 允许数据修改型 CTE），`PRAGMA query_only=OFF`、`SELECT load_extension(...)`
       也能通过。真正兜住写操作的是 sqlite_ro 的 mode=ro 只读连接 + query_only。

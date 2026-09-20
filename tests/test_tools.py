@@ -173,6 +173,36 @@ def test_list_tables_truncates(tmp_path, monkeypatch):
     assert len([ln for ln in out.splitlines() if ln.startswith("t")]) == 3
 
 
+def test_query_sql_clips_huge_cell_and_output(tmp_path, monkeypatch):
+    """单行超大值必须被收敛：行数上限管不住"一行里一个巨大值"。
+
+    回归背景：此前只有 MAX_ROWS，`SELECT zeroblob(5000000)` 会展开成两千万字符的返回文本
+    （既可能打爆 server 内存，也会挤爆模型上下文），与文件侧 MAX_READ_CHARS 的口径不对称。
+    """
+    from mcp_tools import sqlite_ro
+
+    monkeypatch.setattr(sqlite_ro, "MAX_CELL_CHARS", 50)
+    monkeypatch.setattr(sqlite_ro, "MAX_OUTPUT_CHARS", 200)
+
+    db = tmp_path / "big.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("CREATE TABLE blob_t(id INTEGER PRIMARY KEY, v BLOB);")
+    conn.execute("INSERT INTO blob_t(id, v) VALUES (1, zeroblob(5000)), (2, zeroblob(5000))")
+    conn.commit()
+    conn.close()
+
+    out = sqlite_ro.query_sql(str(db), "SELECT v FROM blob_t")
+    assert "单元格过长" in out
+    assert "结果过大已截断" in out
+    assert len(out) < 1000  # 关键断言：不是把两行各 5000 字节原样拼出来
+
+
+def test_glob_rooted_pattern_rejected(tmp_path):
+    """Windows rooted pattern（有根无盘符）也必须被闸门拒绝，而不是由 pathlib 抛 NotImplementedError。"""
+    for pattern in ("/Windows/*.ini", "\\Windows\\*.ini", "C:Windows/*.ini"):
+        assert "不允许" in glob_files(tmp_path, pattern)
+
+
 def test_connect_sets_busy_timeout(demo_db):
     """只读连接也要设 busy_timeout，否则撞上别的写事务会直接 'database is locked'。"""
     from mcp_tools import sqlite_ro
