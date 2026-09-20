@@ -13,6 +13,11 @@ venv/
 *.sqlite
 data/
 
+# MCP 客户端配置：由 scripts/gen_configs.py 按本机路径生成，因此不入库
+# （*.json.example 只是"产物形状"参考，不需要手改）
+configs/*.json
+!configs/*.json.example
+
 # IDE
 .idea/
 .vscode/

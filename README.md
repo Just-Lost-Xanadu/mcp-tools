@@ -37,6 +37,11 @@ python demo_client/mcp_call.py
 > `configs/*.json` 里的 `command` / `cwd` / `env` 必须是**绝对路径**，且 `command` 要指向装了本包的
 > `.venv` 解释器（裸 `python` 通常 import 不到 `mcp_tools`）。这些路径因人而异，所以**不要手改 JSON**：
 > 用 `python scripts/gen_configs.py` 从脚本自身位置推导生成，clone 到任何目录都对。
+>
+> **这两份 JSON 是生成物，不入库**（仓库里只有 `configs/*.json.example` 作为"产物形状"参考）。
+> 也就是说：**你不需要填任何路径**——跑一次上面那条 `gen_configs.py` 就会生成本机正确的绝对路径；
+> 换机器/换目录再跑一次即可。生成脚本会顺带检查"当前解释器能不能 import 到本包"，避免用裸 `python`
+> 生成出一份坏配置。
 
 ## 目录结构
 
@@ -47,7 +52,7 @@ src/mcp_tools/
   security.py          # 共用安全守卫：SQL 只读文本闸 + 路径白名单 realpath 校验
 tests/test_tools.py    # 21 项单测（`pytest` 实测 21 passed）：安全护栏（SQL 只读/注入、路径白名单）
                        #  + 工具功能 + 加固与资源上限回归（中文表名 / 大小写 / union 词边界 / 输出上限 / busy_timeout）
-configs/               # MCP 客户端配置（由 scripts/gen_configs.py 生成，勿手改）
+configs/               # *.json 是生成物（不入库），*.json.example 只是产物形状参考；用 gen_configs.py 生成
 demo_client/           # 自研 MCP 客户端示例（纯 JSON-RPC，无业务耦合）
 scripts/               # make_demo_db.py（生成演示库）/ gen_configs.py（生成客户端配置）
 requirements.lock      # 已验证可跑的依赖组合（实测 mcp 1.30.0，Python 3.12）
@@ -78,3 +83,7 @@ requirements.lock      # 已验证可跑的依赖组合（实测 mcp 1.30.0，Py
 - 换目录/换机器后先 `python scripts/gen_configs.py`，否则 `configs/*.json` 里还是上一台机器的绝对路径。
 - 纯标准 + mcp 依赖，无 torch/embedding。
 - `cwd` 必须指向仓库根（模块名 `mcp_tools.*`、相对 `demo.db`）。
+
+## 许可证
+
+[MIT](./LICENSE) © 2026 Just-Lost-Xanadu

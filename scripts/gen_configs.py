@@ -44,6 +44,20 @@ def main() -> int:
     python = sys.executable
     servers = _servers(python)
 
+    # 自检：配置里的 command 指向的解释器必须能 import 到本包，否则生成的配置
+    # "看起来能加载、一调用就 ModuleNotFoundError"。裸 python（没装本包）是最常见的踩法。
+    # 这里选择**拒绝写入**而不是"警告后照写"：否则一次手滑就会把本机原本可用的配置覆盖成坏的。
+    import importlib.util
+
+    if importlib.util.find_spec("mcp_tools") is None:
+        print(
+            f"[!] 当前解释器 import 不到 mcp_tools：{python}\n"
+            "    请改用装好本包的 .venv 解释器运行本脚本，例如：\n"
+            r"      .venv\Scripts\python.exe scripts\gen_configs.py" + "\n"
+            "    （已跳过写文件，避免把你本机可用的配置覆盖成坏的）"
+        )
+        return 1
+
     inspector = {
         "_说明": (
             "MCP Inspector 的 server 配置（也可粘进 Claude Desktop）。"
