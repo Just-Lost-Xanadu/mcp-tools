@@ -4,7 +4,8 @@
 白名单根目录内，防目录穿越。所有读取限制在 root 之下进行：
   - list_dir：列某目录条目（root 的相对目录）
   - read_file：读某文件文本（UTF-8，超大文件截断）
-  - glob_files：按 glob 在 root 内递归查找（v1: 无前缀点目录，rglob 不跟符号链）
+  - glob_files：按 glob 在 root 内递归查找（**不返回点开头路径**，如 .git/ .venv/；
+    rglob 不跟目录符号链）。注意这是"结果过滤"而不是权限——真正的边界只有白名单根本身。
 
 【OOP 说明】files_safe 的差异点是"root 白名单目录"是一次性配置——这让它是三件里最接近
 "对象状态"的模块。现状用 create_server(root) 在闭包捕获 root（函数式注入）；若你希望换成
@@ -78,13 +79,22 @@ MAX_GLOB_RESULTS = 200  # glob 结果上限；超过仅展示前 200 个并提�
 def glob_files(root: Path, pattern: str) -> str:
     """在 root 内按 glob 递归查找文件，返回相对 root 的路径列表（按字典序）。
 
-    用 pathlib.rglob（不默认跟随目录 symlink），命中过多时只返回前 MAX_GLOB_RESULTS 条提示
+    用 pathlib.rglob（不跟随目录 symlink），命中过多时只返回前 MAX_GLOB_RESULTS 条提示
     缩小 pattern——防止一整棵大目录被模型一条 glob 全部拉回。
 
     安全（与 list_dir / read_file 同一闸口，两道）：
       1. pattern 本身不允许绝对路径或 `..`——pathlib 对 `..` 只做词法拼接、不 resolve，
          否则 `../*.txt` 会枚举到白名单之外；
       2. 每个命中都过 resolve_within_root，realpath 落在 root 外（含指向外部的符号链接）即丢弃。
+
+    点开头的路径（`.git/`、`.venv/`、`.pytest_cache/` 及其下文件）**不返回**。
+    为什么必须排除：本工具默认的白名单根就是仓库根（见 gen_configs.py），而 rglob 会照走
+    这些目录——实测 `glob_files(repo, '**/*.py')` 返回的前 200 条**全部**是
+    `.venv\\Lib\\site-packages\\...`，项目自己的代码一条都没有：模型问"项目里有哪些 py"
+    会得到一份纯依赖库清单，等于把 .git 与虚拟环境暴露给模型。
+    （注：被跳过的子树仍会被 rglob 走到，因此对"根目录里带 .venv"的仓库，宽 pattern
+    依然要花一次全树遍历的时间——返回结果是对的，只是不快。要连遍历也省掉，
+    应该把白名单根设成专用数据目录，而不是仓库根，见 README「常见坑」。）
     """
     if not pattern:
         return "（pattern 不能为空）"
@@ -99,17 +109,22 @@ def glob_files(root: Path, pattern: str) -> str:
     for path in root.rglob(pattern):
         if not path.is_file():
             continue
+        relative = path.relative_to(root)
+        if any(part.startswith(".") for part in relative.parts):
+            continue  # 点目录/点文件：见 docstring
         try:
             resolve_within_root(str(path), root)
         except ValueError:
             continue
-        hits.append(str(path.relative_to(root)))
+        hits.append(str(relative))
+    # 先全收再排序再截断（而不是"收满 200 条就提前退出"）：这样"显示哪 200 条"
+    # 只取决于字典序，与文件系统的遍历顺序无关——换机器/换文件系统结果一致，
+    # 截断后的内容是确定的、可复现的。代价是宽 pattern 仍会走完整棵树（见 docstring）。
     hits.sort()
     if not hits:
         return "（无匹配文件）"
     if len(hits) > MAX_GLOB_RESULTS:
-        hits = hits[:MAX_GLOB_RESULTS]
-        return "\n".join(hits) + (
+        return "\n".join(hits[:MAX_GLOB_RESULTS]) + (
             f"\n...（命中过多，仅显示前 {MAX_GLOB_RESULTS} 个，请用更精确的 pattern）"
         )
     return "\n".join(hits)

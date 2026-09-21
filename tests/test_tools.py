@@ -192,9 +192,86 @@ def test_query_sql_clips_huge_cell_and_output(tmp_path, monkeypatch):
     conn.close()
 
     out = sqlite_ro.query_sql(str(db), "SELECT v FROM blob_t")
-    assert "单元格过长" in out
-    assert "结果过大已截断" in out
+    assert "单元格过长" in out          # 单元格这道闸的提示
+    assert "有单元格超过" in out        # 汇总提示里也要说实话（是单元格那道闸生效）
     assert len(out) < 1000  # 关键断言：不是把两行各 5000 字节原样拼出来
+
+
+def test_truncation_notice_names_the_gate_that_actually_fired(tmp_path, monkeypatch):
+    """输出上限先掐掉尾巴时，绝不能声称"仅显示前 200 行"。
+
+    回归背景：`truncated` 只表示"fetchmany 取到了第 201 行"，与"实际渲染了几行"是两件事。
+    早先实现一律把"仅显示前 200 行"和"单元格上限"两句都印出来，于是
+    "行数很多但每列都很短"的查询（实测 300 行 × 约 145 字符只渲染了 136 行）
+    会得到一句根本没发生的"单元格过长"，而真正生效的"少显示了 N 行"反而没提——
+    模型据此以为拿到了全量数据。
+    """
+    from mcp_tools import sqlite_ro
+
+    monkeypatch.setattr(sqlite_ro, "MAX_OUTPUT_CHARS", 400)
+    db = tmp_path / "wide.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);")
+    conn.executemany("INSERT INTO t(id, v) VALUES (?, ?)", [(i, "x" * 50) for i in range(1, 51)])
+    conn.commit()
+    conn.close()
+
+    out = sqlite_ro.query_sql(str(db), "SELECT * FROM t")
+    assert "仅显示前 200 行" not in out, "行数闸根本没触发，不许这么说"
+    assert "单元格" not in out, "没有单元格被截断"
+    assert "已取回 50 行" in out, "必须说清取回了几行、实际显示了几行"
+
+
+def test_row_cap_notice_only_when_row_cap_fired(tmp_path, monkeypatch):
+    """行数闸真的触发时才说"仅显示前 N 行"，且不得顺带报没发生的单元格截断。"""
+    from mcp_tools import sqlite_ro
+
+    monkeypatch.setattr(sqlite_ro, "MAX_ROWS", 3)
+    db = tmp_path / "many.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);")
+    conn.executemany("INSERT INTO t(id, v) VALUES (?, ?)", [(i, "y") for i in range(1, 7)])
+    conn.commit()
+    conn.close()
+
+    out = sqlite_ro.query_sql(str(db), "SELECT * FROM t")
+    assert "仅显示前 3 行" in out
+    assert "单元格" not in out
+
+
+def test_glob_skips_dot_directories_and_dot_files(tmp_path):
+    """点开头的目录/文件不进结果：默认白名单根是仓库根，否则返回的全是 .venv 噪声。
+
+    实测（修复前）：`glob_files(仓库根, '**/*.py')` 的前 200 条**全部**是
+    `.venv\\Lib\\site-packages\\...`，项目自己的代码一条都没有。
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("x", encoding="utf-8")
+    (tmp_path / ".venv" / "Lib").mkdir(parents=True)
+    (tmp_path / ".venv" / "Lib" / "b.py").write_text("y", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "c.py").write_text("z", encoding="utf-8")
+    (tmp_path / ".hidden.py").write_text("h", encoding="utf-8")
+
+    out = glob_files(tmp_path, "*.py")
+    assert "a.py" in out
+    assert "b.py" not in out and "c.py" not in out
+    assert ".hidden.py" not in out
+
+
+def test_pragma_write_with_schema_prefix_is_rejected():
+    """schema 限定写法的写类 PRAGMA 也必须被拦（此前只拦得住不带前缀的）。"""
+    for bad in (
+        "PRAGMA main.journal_mode=WAL",
+        'PRAGMA "journal_mode"=WAL',
+        "PRAGMA main.wal_checkpoint(TRUNCATE)",
+        "PRAGMA synchronous=OFF",
+    ):
+        with pytest.raises(ValueError):
+            validate_readonly_sql(bad)
+    # 正常只读 PRAGMA 仍要放行（别把闸门收得连 describe 都用不了）
+    assert validate_readonly_sql("PRAGMA table_info(regions)")
+    assert validate_readonly_sql("PRAGMA main.table_info(regions)")
 
 
 def test_glob_rooted_pattern_rejected(tmp_path):

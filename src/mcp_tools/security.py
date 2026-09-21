@@ -26,8 +26,17 @@ from pathlib import Path
 
 _SQL_HEAD = re.compile(r"^\s*(select|with|explain|pragma)\b", re.IGNORECASE)
 _SQL_UNION = re.compile(r"\bunion\b")
+# 写类 PRAGMA 黑名单。**必须允许 schema 限定名**：原先只写 `pragma\s+(name)`，
+# 于是 `PRAGMA main.journal_mode=WAL`、`PRAGMA "journal_mode"=WAL`、
+# `PRAGMA main.wal_checkpoint(TRUNCATE)` 全部能过闸——docstring 声称这一层"单独拦截"，
+# 实际只拦得住不带前缀的写法。现在补上可选的 `schema.` 前缀（含带引号/方括号的写法）。
+# 注意这不改变"黑名单不全"的事实：`PRAGMA query_only=OFF`、`PRAGMA writable_schema=ON`
+# 仍能过闸（README 如实写明），真正兜住写操作的自始至终是 mode=ro 只读 URI。
 _SQL_PRAGMA_WRITE = re.compile(
-    r"\bpragma\s+(journal_mode|synchronous|locking_mode|wal_checkpoint|cache_size)\b",
+    r"\bpragma\s+"
+    r"(?:[\w\"'\[\]]+\s*\.\s*)?"     # 可选 schema 前缀：main. / "main". / [main].
+    r"[\"'\[\]]?"                    # 名字本身也可能被引号/方括号包起来
+    r"(journal_mode|synchronous|locking_mode|wal_checkpoint|cache_size)",
     re.IGNORECASE,
 )
 _SQL_BLOCK = (";", "--", "/*", "*/", "\\")
@@ -46,12 +55,17 @@ def validate_readonly_sql(sql: str) -> str:
       （如 communication、reunion）；真正的写库由"只读 URI + query_only"双保险兜底。
     - describe/pragma 曾被一起放行，但 SQLite 并没有 DESCRIBE 语句（`describe_table`
       走的是 PRAGMA table_info，且不经过本闸），放行它只会让这类语句在执行期报语法错误，
-      已删除；PRAGMA 保留放行，写入类 PRAGMA 由 _SQL_PRAGMA_WRITE 单独拦截
-      （黑名单不全，例如 `writable_schema=ON` 能过闸，但被 mode=ro 物理拒绝），
-      最终写库由 DB 层只读兜底。
+      已删除；PRAGMA 保留放行，写入类 PRAGMA 由 _SQL_PRAGMA_WRITE 单独拦截（含
+      `PRAGMA main.journal_mode=...` 这类 schema 限定写法）。**但黑名单本来就列不全**：
+      `PRAGMA query_only=OFF`、`PRAGMA writable_schema=ON` 都能过闸（前者实测能把连接上的
+      query_only 关掉），最终写库由 DB 层的 mode=ro 只读 URI 物理兜底。
     - 这是"粗筛"而不是语法解析：`WITH x AS (SELECT 1) DELETE FROM t` 能通过本闸
-      （SQLite 允许数据修改型 CTE），`PRAGMA query_only=OFF`、`SELECT load_extension(...)`
-      也能通过。真正兜住写操作的是 sqlite_ro 的 mode=ro 只读连接 + query_only。
+      （SQLite 允许数据修改型 CTE），`SELECT load_extension(...)` 也能通过。
+      真正兜住写操作的是 sqlite_ro 的 mode=ro 只读连接 + query_only。
+    - 同理，`_SQL_BLOCK` 对 `;` / `--` / `/*` / `\\` 做的是**全文子串匹配**，
+      连字符串字面量里的内容也一并拦下——`SELECT 'a--b'`、`WHERE path='C:\\tmp'`
+      这类完全合法的只读查询会被拒。这是刻意的保守取舍（宁可多拒、不可漏放），
+      不是 bug；README「已知取舍」已写明本闸只做粗筛。
     """
     if not sql or not isinstance(sql, str):
         raise ValueError("SQL 不能为空")

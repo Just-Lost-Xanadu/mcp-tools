@@ -11,8 +11,8 @@
 
 | Server | 工具 | 安全设计 |
 |---|---|---|
-| `sqlite-ro` 只读 SQLite | `list_tables_tool` / `describe_table_tool` / `query_sql_tool` | 三层"硬度不同"，**并非等价三层**：**只有只读 URI(`mode=ro`) 是不可被 SQL 解除的硬保证**；`PRAGMA query_only=ON` 只是纵深——**它能被一条通过文本闸的 `PRAGMA query_only=OFF` 带内关掉**（已实测）；`enable_load_extension(False)` 显式关闭扩展加载，堵住能过文本闸的 `SELECT load_extension(...)`（实测报 `not authorized`）。文本闸只做粗筛（放行 SELECT/WITH/EXPLAIN/PRAGMA 开头，拦多语句/注释/UNION/反斜杠，已知可被 `WITH … DELETE` 绕过，写类 PRAGMA 黑名单也不全）；结果收敛有三道——≤200 行、单元格 ≤2000 字符、单次输出 ≤20000 字符（`fetchmany` 取行，超大结果集不会一次性进内存），`list_tables` ≤200 张；连接设 `busy_timeout=5000`，避免撞上别的写事务时直接报 `database is locked` |
-| `files-safe` 受限文件 | `list_dir_tool` / `read_file_tool` / `glob_files_tool` | 白名单根目录：三个入口都过 realpath 校验（`glob` 另拒绝对路径与 `..` pattern——含 Windows 的 rooted pattern，如 `/Windows/*.ini`），越界即拒（防目录穿越）；**三种输出都有收敛上限**——`read_file` 只从流里读前 20 万字符（不是整读再截断）、`list_dir` 与 `glob` 各上限 200 条 |
+| `sqlite-ro` 只读 SQLite | `list_tables_tool` / `describe_table_tool` / `query_sql_tool` | 三层"硬度不同"，**并非等价三层**：**只有只读 URI(`mode=ro`) 是不可被 SQL 解除的硬保证**；`PRAGMA query_only=ON` 只是纵深——**它能被一条通过文本闸的 `PRAGMA query_only=OFF` 带内关掉**（已实测）；`enable_load_extension(False)` 显式关闭扩展加载，堵住能过文本闸的 `SELECT load_extension(...)`（实测报 `not authorized`）。文本闸只做粗筛（放行 SELECT/WITH/EXPLAIN/PRAGMA 开头，拦多语句/注释/UNION/反斜杠，已知可被 `WITH … DELETE` 绕过，写类 PRAGMA 黑名单也不全——但它现在**连 `PRAGMA main.journal_mode=WAL` 这类 schema 限定写法一起拦**，不再只拦不带前缀的）；结果收敛有三道——≤200 行、单元格 ≤2000 字符、单次输出 ≤20000 字符（`fetchmany` 取行，超大结果集不会一次性进内存），`list_tables` ≤200 张；**每道闸的截断提示只报实际触发的那一道**（不会出现"只渲染了 136 行、却说显示了前 200 行"这种自相矛盾的提示）；连接设 `busy_timeout=5000`，避免撞上别的写事务时直接报 `database is locked` |
+| `files-safe` 受限文件 | `list_dir_tool` / `read_file_tool` / `glob_files_tool` | 白名单根目录：三个入口都过 realpath 校验（`glob` 另拒绝对路径与 `..` pattern——含 Windows 的 rooted pattern，如 `/Windows/*.ini`），越界即拒（防目录穿越）；**三种输出都有收敛上限**——`read_file` 只从流里读前 20 万字符（不是整读再截断）、`list_dir` 与 `glob` 各上限 200 条；`glob` **不返回点开头路径**（`.git/`、`.venv/` 及其下文件）——修复前默认根为仓库根时，`glob_files(仓库根,'**/*.py')` 的前 200 条**全部**是 `.venv\Lib\site-packages\…`，项目代码一条都没有（现已实测返回 8 条项目自身的 py） |
 
 ## 接入方式（stdio）
 
@@ -50,8 +50,9 @@ src/mcp_tools/
   sqlite_ro.py         # 只读 SQLite Server：list_tables_tool / describe_table_tool / query_sql_tool
   files_safe.py        # 受限文件 Server：list_dir_tool / read_file_tool / glob_files_tool
   security.py          # 共用安全守卫：SQL 只读文本闸 + 路径白名单 realpath 校验
-tests/test_tools.py    # 21 项单测（`pytest` 实测 21 passed）：安全护栏（SQL 只读/注入、路径白名单）
-                       #  + 工具功能 + 加固与资源上限回归（中文表名 / 大小写 / union 词边界 / 输出上限 / busy_timeout）
+tests/test_tools.py    # 25 项单测（`pytest` 实测 25 passed）：安全护栏（SQL 只读/注入、路径白名单）
+                       #  + 工具功能 + 加固与资源上限回归（中文表名 / 大小写 / union 词边界 / 输出上限 /
+                       #    busy_timeout / schema 限定写类 PRAGMA / glob 点目录排除 / 截断提示口径）
 configs/               # *.json 是生成物（不入库），*.json.example 只是产物形状参考；用 gen_configs.py 生成
 demo_client/           # 自研 MCP 客户端示例（纯 JSON-RPC，无业务耦合）
 scripts/               # make_demo_db.py（生成演示库）/ gen_configs.py（生成客户端配置）
@@ -63,7 +64,7 @@ requirements.lock      # 已验证可跑的依赖组合（实测 mcp 1.30.0，Py
 1. **MCP Inspector**：先 `python scripts/gen_configs.py`，再加载生成的 `configs/mcp_inspector.json`，浏览器里直接调两个 Server 的工具；
 2. **Claude Desktop**：把 `configs/claude_desktop_config.json` 的 `mcpServers` 整段并入其配置并重启，直接问"查一下华东区一季度销售额"；
 3. **自研 Agent**：`demo_client/mcp_call.py` 走标准协议调用——证明"工具与消费方解耦、可跨客户端复用"（脚本会检查 `isError`，工具报错不会被当成查询结果打印）。
-4. 安全单测：`pytest tests`（**21 passed**：SQL 注入/多语句被拦、目录穿越与越界 glob 被拒、中文表名与大小写回归、输出上限与 `busy_timeout` 等）。
+4. 安全单测：`pytest tests`（**25 passed**：SQL 注入/多语句被拦、目录穿越与越界 glob 被拒、中文表名与大小写回归、输出上限与 `busy_timeout`、schema 限定写类 PRAGMA、glob 点目录排除、截断提示口径等）。
 
 ## 已知取舍 / 下一步
 
@@ -75,6 +76,11 @@ requirements.lock      # 已验证可跑的依赖组合（实测 mcp 1.30.0，Py
   - 扩展加载已显式关闭（`conn.enable_load_extension(False)`）：实测 `SELECT load_extension('evil')` 报 `not authorized`。Python `sqlite3` 默认即关闭，这里显式声明是为了不依赖解释器默认值。
 - 语句执行级超时未实现（只有结果行数上限 200），README 不宣称具备该能力。
 - 只读是"文件级"的：`mode=ro` 保护的是**被打开的那个库文件**；不做 SQL 语义级白名单（例如某张表本不该给模型看），也不做按调用方的行级/列级过滤。
+- **文本闸会对合法查询误报（保守取舍，已知且不打算改）**：`_SQL_BLOCK` 对 `;` / `--` / `/*` / `\` 做的是全文子串匹配，连字符串字面量里的内容一起拦。实测 `SELECT * FROM regions WHERE name='a--b'`、`... WHERE path='C:\tmp'` 都会被拒（错误信息说"检测到不允许的内容"，其实没有注入）。宁可多拒、不可漏放——要精确判定就得做 SQL 语法解析，那超出本套件刻意收敛的边界。
+- **`files-safe` 的唯一边界是"白名单根目录"，根内没有排除项**：
+  - 默认根是**当前工作目录**，而 `scripts/gen_configs.py` 生成的配置把 `MCP_FILES_ROOT` 设成**仓库根**——于是 `list_dir` 会列出 `.git/`、`.venv/`，`read_file` 也能读到它们（都在根内，不算越权）；
+  - `glob_files` 已排除点开头路径（避免返回一屏 `.venv` 依赖），但**这只是一条"结果过滤"，不是权限**——真正的边界始终是白名单根；
+  - 真实使用时应把 `MCP_FILES_ROOT` 指到一个**专用数据目录**，而不是仓库根。演示里用仓库根只是为了让 clone 下来即可跑，README 在此如实说明。
 - 下一步方向：动态工具注册 / 集成到一号项目作为其 MCP 工具源，暂不实现。
 
 ## 常见坑
@@ -83,6 +89,7 @@ requirements.lock      # 已验证可跑的依赖组合（实测 mcp 1.30.0，Py
 - 换目录/换机器后先 `python scripts/gen_configs.py`，否则 `configs/*.json` 里还是上一台机器的绝对路径。
 - 纯标准 + mcp 依赖，无 torch/embedding。
 - `cwd` 必须指向仓库根（模块名 `mcp_tools.*`、相对 `demo.db`）。
+- **宽 pattern 的 `glob` 仍会走完整棵树**：点目录被排除的是"返回结果"，`rglob` 依然会遍历它们。实测 `glob_files(仓库根, '**/*.py')` 耗时约 0.7s，其中大部分花在走 `.venv`——返回结果是对的（8 条项目自身的 py），只是不快。想要连遍历也省掉，就把 `MCP_FILES_ROOT` 设成不含虚拟环境的专用目录（这也是上面"已知取舍"里推荐的做法）。
 
 ## 许可证
 

@@ -84,30 +84,48 @@ def _rows_to_text(columns: list[str], rows: list[tuple], truncated: bool) -> str
     （例如 `SELECT zeroblob(5000000)` 或一条超长 TEXT 列）仍会展开成上千万字符的
     Python 字符串——既能把 server 进程的内存打爆，也会把模型上下文挤爆。
     文件侧早有 MAX_READ_CHARS 收敛，这里把 SQL 侧的对称口径补上。
+
+    截断提示必须**按实际触发的那道闸**来说：上面三道闸（行数 / 单元格 / 总输出）
+    是彼此独立的，早期实现一律把"单元格上限 + 总输出上限"两句都印出来，于是
+    "行数很多但每列都很短"的场景会看到一句根本没发生的"单元格过长"，
+    而真正生效的"只显示了前 N 行"反而因为行数闸没触发而不说——模型据此以为看到了全量。
+    实测：300 行 × 约 145 字符的查询实际只渲染了 136 行，输出里却写着"仅显示前 200 行"。
     """
     header, header_clipped = _clip_cell(" | ".join(str(c) for c in columns))
     lines = [header]
     used = len(header)
-    clipped = header_clipped
+    cell_clipped = header_clipped
+    output_clipped = False
     for row in rows:
         rendered = []
         for value in row:
             cell, was_clipped = _clip_cell(value)
             rendered.append(cell)
-            clipped = clipped or was_clipped
+            cell_clipped = cell_clipped or was_clipped
         line = " | ".join(rendered)
         if used + len(line) + 1 > MAX_OUTPUT_CHARS:
-            clipped = True
+            output_clipped = True
             break
         lines.append(line)
         used += len(line) + 1
+
+    shown = len(lines) - 1   # 实际渲染出来的数据行数（不含表头）
+    notes: list[str] = []
+    if cell_clipped:
+        notes.append(f"有单元格超过 {MAX_CELL_CHARS} 字符，已截断")
+    if output_clipped:
+        notes.append(f"输出超过 {MAX_OUTPUT_CHARS} 字符上限，已提前停止渲染")
     if truncated:
-        lines.append(f"...（仅显示前 {MAX_ROWS} 行，请用更精确的 SQL 缩小范围）")
-    if clipped:
-        lines.append(
-            f"...（结果过大已截断：单元格上限 {MAX_CELL_CHARS} 字符 / "
-            f"总输出上限 {MAX_OUTPUT_CHARS} 字符，请用更精确的 SQL 缩小范围）"
+        # 行数闸触发 = 数据库里还有更多行没取回来
+        notes.append(f"仅显示前 {MAX_ROWS} 行，请用更精确的 SQL 缩小范围")
+    elif shown < len(rows):
+        # 行数闸没触发，但输出闸先掐掉了尾巴：必须说清"少了几行、为什么"
+        notes.append(
+            f"已取回 {len(rows)} 行，其中只有前 {shown} 行能显示（受总输出上限所限），"
+            "请用更精确的 SQL 缩小范围"
         )
+    if notes:
+        lines.append("...（" + "；".join(notes) + "）")
     return "\n".join(lines)
 
 
