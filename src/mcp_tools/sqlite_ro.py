@@ -40,6 +40,9 @@ MAX_ROWS = 200
 MAX_TABLES = 200   # list_tables 结果上限，与 query_sql 的行数上限保持一致的收敛口径
 MAX_CELL_CHARS = 2000     # 单个单元格上限：行数上限约束不了"单行一个超大值"
 MAX_OUTPUT_CHARS = 20000  # 单次工具输出总上限（与 read_file 的 MAX_READ_CHARS 同属收敛口径）
+# 结尾那行"...（提示）"是在渲染循环 break 之后无条件追加的，因此必须在预算里先给它留位置，
+# 否则"单次输出 ≤ MAX_OUTPUT_CHARS"这条声明会失效（实测溢出到 20054 字符）。
+_NOTE_RESERVE_CHARS = 200
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -54,8 +57,9 @@ def _connect(db_path: Path) -> sqlite3.Connection:
         raise FileNotFoundError(f"数据库不存在：{db_path}（先运行 scripts/make_demo_db.py）")
     uri = f"{db_path.resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
-    # busy_timeout 放在 query_only 之前：只读连接同样会撞上 SQLITE_BUSY
-    # （别的进程正在写、或有未提交事务），不设超时就直接抛 "database is locked"。
+    # busy_timeout 显式写死：Python 的 sqlite3.connect 默认 timeout=5.0 **已经等于** 5000ms，
+    # 所以这行不是为了"不设就会抛 database is locked"（不设也是 5000），而是把这个值钉在
+    # 本模块里——将来若有人改 connect 的 timeout（或换包装库），这里不会跟着变。
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA query_only = ON")
     # 第三道：显式关闭扩展加载。`SELECT load_extension('...')` 能过 SQL 文本闸，
@@ -90,12 +94,18 @@ def _rows_to_text(columns: list[str], rows: list[tuple], truncated: bool) -> str
     "行数很多但每列都很短"的场景会看到一句根本没发生的"单元格过长"，
     而真正生效的"只显示了前 N 行"反而因为行数闸没触发而不说——模型据此以为看到了全量。
     实测：300 行 × 约 145 字符的查询实际只渲染了 136 行，输出里却写着"仅显示前 200 行"。
+
+    补充（两道闸**同时**生效时的口径，实测 134 行却称"前 200 行"就是这个分支）：
+    `truncated` 只表示"fetchmany 取到了第 201 行"，它**不等于**"实际渲染了 200 行"。
+    所以两闸同开时不能再声称"仅显示前 MAX_ROWS 行"，必须报实际渲染行数——否则
+    本函数要修的那个毛病会从"从句式"换个分支原样长回来。
     """
     header, header_clipped = _clip_cell(" | ".join(str(c) for c in columns))
     lines = [header]
     used = len(header)
-    cell_clipped = header_clipped
+    cell_clipped = False
     output_clipped = False
+    budget = MAX_OUTPUT_CHARS - min(_NOTE_RESERVE_CHARS, MAX_OUTPUT_CHARS // 4)
     for row in rows:
         rendered = []
         for value in row:
@@ -103,7 +113,7 @@ def _rows_to_text(columns: list[str], rows: list[tuple], truncated: bool) -> str
             rendered.append(cell)
             cell_clipped = cell_clipped or was_clipped
         line = " | ".join(rendered)
-        if used + len(line) + 1 > MAX_OUTPUT_CHARS:
+        if used + len(line) + 1 > budget:
             output_clipped = True
             break
         lines.append(line)
@@ -111,35 +121,56 @@ def _rows_to_text(columns: list[str], rows: list[tuple], truncated: bool) -> str
 
     shown = len(lines) - 1   # 实际渲染出来的数据行数（不含表头）
     notes: list[str] = []
+    if header_clipped:
+        # 表头被截断不是"单元格被截断"：混为一谈会让模型以为数据被砍了，而列名被砍反而没人说
+        notes.append(f"列名过长，已按 {MAX_CELL_CHARS} 字符截断")
     if cell_clipped:
         notes.append(f"有单元格超过 {MAX_CELL_CHARS} 字符，已截断")
     if output_clipped:
         notes.append(f"输出超过 {MAX_OUTPUT_CHARS} 字符上限，已提前停止渲染")
-    if truncated:
-        # 行数闸触发 = 数据库里还有更多行没取回来
+    if shown == 0 and rows:
+        # 单行过宽：一行都放不下。此时说"只有前 0 行能显示"是无意义措辞
+        notes.append("单行过宽，整行都放不下，请减少列数或缩短列宽")
+    elif truncated and output_clipped:
+        # 两闸同开：实际渲染行数由输出闸决定，不能再声称"显示了前 MAX_ROWS 行"
+        notes.append(
+            f"已取回 {len(rows)} 行（行数上限 {MAX_ROWS}），其中只有前 {shown} 行能显示，"
+            "请用更精确的 SQL 缩小范围"
+        )
+    elif truncated:
+        # 行数闸触发 = 数据库里还有更多行没取回来，且这一批都已渲染出来
         notes.append(f"仅显示前 {MAX_ROWS} 行，请用更精确的 SQL 缩小范围")
-    elif shown < len(rows):
+    elif output_clipped:
         # 行数闸没触发，但输出闸先掐掉了尾巴：必须说清"少了几行、为什么"
         notes.append(
             f"已取回 {len(rows)} 行，其中只有前 {shown} 行能显示（受总输出上限所限），"
             "请用更精确的 SQL 缩小范围"
         )
+    if not rows and not notes:
+        # 空结果集此前只回一行表头（如 `id | v`）——与"一行数据、其两列恰好是 id/v"同形，
+        # 模型读不出"0 行"，可能据此以为查到了东西。显式标出来（与 list_dir 的"（空目录）"同口径）。
+        lines.append("（0 行）")
     if notes:
         lines.append("...（" + "；".join(notes) + "）")
     return "\n".join(lines)
 
 
 def list_tables(db_path: str) -> str:
-    """返回业务表名（按字母序，每行一个），超过 MAX_TABLES 即截断。
+    """返回业务表名（按字母序，每行一个），超过 MAX_TABLES 或 MAX_OUTPUT_CHARS 即截断。
 
-    排除 sqlite 内部表（NOT LIKE 'sqlite_%'）：对模型暴露的就是"干净的可查表清单"。
+    排除 sqlite 内部表用 `name NOT GLOB 'sqlite_*'` 而**不是** `NOT LIKE 'sqlite_%'`：
+    LIKE 里 `_` 是单字符通配符，`'sqlite_%'` 实际匹配"sqlite + 任意 1 字符 + 任意后缀"，
+    于是所有形如 `sqlitemp` / `sqlitex_hidden` 的**合法用户表**都被当内部表静默隐藏
+    （实测：库里 4 张表，list_tables 只返回 2 张，而 query_sql 照样能查那张"不存在"的表）。
+    SQLite 保留的只是**字面** `sqlite_` 前缀（建表时会被拒绝），GLOB 的 `*` 通配不涉及 `_` 语义。
     截断上限是为了和 query_sql/glob 的口径一致——这段文本会整段进模型上下文，
-    一个上千张表的库足以把上下文挤爆（此前只有 query_sql 和 glob 有上限）。
+    一个上千张表的库足以把上下文挤爆（此前只有 query_sql 和 glob 有上限）；
+    条数之外还要有字符上限：200 个超长表名实测能到 40889 字符，是 MAX_OUTPUT_CHARS 的两倍。
     """
     conn = _connect(Path(db_path))
     try:
         rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*' "
             "ORDER BY name LIMIT ?",
             (MAX_TABLES + 1,),
         ).fetchall()
@@ -149,9 +180,24 @@ def list_tables(db_path: str) -> str:
         return "（空库）"
     truncated = len(rows) > MAX_TABLES
     names = [r[0] for r in rows[:MAX_TABLES]]
-    text = "\n".join(names)
+    budget = MAX_OUTPUT_CHARS - min(_NOTE_RESERVE_CHARS, MAX_OUTPUT_CHARS // 4)
+    used = 0
+    lines: list[str] = []
+    for name in names:
+        if used + len(name) + 1 > budget:
+            break
+        lines.append(name)
+        used += len(name) + 1
+    text = "\n".join(lines)
+    notes: list[str] = []
+    if len(lines) < len(names):
+        notes.append(
+            f"表名过长，受 {MAX_OUTPUT_CHARS} 字符上限所限，实际只显示了前 {len(lines)} 张"
+        )
     if truncated:
-        text += f"\n...（表过多，仅显示前 {MAX_TABLES} 张）"
+        notes.append(f"表过多，仅显示前 {MAX_TABLES} 张")
+    if notes:
+        text += "\n...（" + "；".join(notes) + "）"
     return text
 
 
@@ -163,6 +209,8 @@ def describe_table(db_path: str, table: str) -> str:
       并按 SQLite 标识符规则把双引号双写转义 —— 注入面在绑定查询那一步就被切断；
     - 刻意不用 ASCII 正则限制表名：那会导致 list_tables 能列出的中文表名
       （如 `订单`）在 describe_table 里被误报"表不存在"。
+    - 列数同样受 MAX_ROWS 约束（此前硬编码 truncated=False + fetchall，300 列的表会整表返回
+      且没有任何行数提示——同一个 _rows_to_text 在两个工具上口径不一致）。
     """
     conn = _connect(Path(db_path))
     try:
@@ -173,17 +221,20 @@ def describe_table(db_path: str, table: str) -> str:
             (table,),
         ).fetchone()
         if row is None:
-            return f"表不存在：{table}"
+            # 视图/虚拟表不在 type='table' 里，但 query_sql 能查它；措辞要如实，
+            # 不能让模型刚查成功一张"不存在的表"。
+            return f"表不存在（或不是普通表，如视图/虚拟表）：{table}"
         quoted = str(row[0]).replace('"', '""')
-        rows = conn.execute(f'PRAGMA table_info("{quoted}")').fetchall()
+        rows = conn.execute(f'PRAGMA table_info("{quoted}")').fetchmany(MAX_ROWS + 1)
     finally:
         conn.close()
     if not rows:
-        return f"表不存在：{table}"
+        return f"表不存在（或不是普通表，如视图/虚拟表）：{table}"
+    truncated = len(rows) > MAX_ROWS
     return _rows_to_text(
         ["cid", "name", "type", "notnull", "default", "pk"],
-        [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows],
-        truncated=False,
+        [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows[:MAX_ROWS]],
+        truncated=truncated,
     )
 
 

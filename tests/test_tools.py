@@ -173,6 +173,167 @@ def test_list_tables_truncates(tmp_path, monkeypatch):
     assert len([ln for ln in out.splitlines() if ln.startswith("t")]) == 3
 
 
+def test_list_tables_does_not_hide_user_tables_starting_with_sqlite(tmp_path):
+    """以 sqlite 开头的**用户表**不能被当成内部表隐藏。
+
+    回归背景：过滤条件写的是 `name NOT LIKE 'sqlite_%'`，而 LIKE 里 `_` 是**单字符通配符**，
+    于是 `'sqlite_%'` 匹配的是"sqlite + 任意 1 字符 + 任意后缀"——实测库里 4 张表
+    （normal / sqlitemp / sqlitex_hidden / t）只返回 2 张，而 query_sql 照样能查
+    `sqlitemp`：模型拿到一份"缺表的可查表清单"，与工具实际能力自相矛盾。
+    SQLite 只保留**字面** `sqlite_` 前缀（建表时会被拒绝），因此 GLOB 才是对的。
+    """
+    from mcp_tools import sqlite_ro
+
+    db = tmp_path / "prefixed.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE sqlitemp(a);"
+        "CREATE TABLE sqlitex_hidden(a);"
+        "CREATE TABLE normal(a);"
+        # sqlite_sequence 由 AUTOINCREMENT 自动创建，属于真正的内部表，必须仍被排除
+        "CREATE TABLE with_autoinc(id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT);"
+    )
+    conn.commit()
+    conn.close()
+
+    out = sqlite_ro.list_tables(str(db))
+    assert "sqlitemp" in out and "sqlitex_hidden" in out and "normal" in out
+    assert "sqlite_sequence" not in out, "真正的内部表仍要排除"
+
+
+def test_list_tables_respects_total_output_cap(tmp_path, monkeypatch):
+    """表名很长时也要受 MAX_OUTPUT_CHARS 约束，且提示要说清"实际显示了几张"。
+
+    回归背景：list_tables 此前只有条数上限（200 张），200 个各 200 字符的表名实测返回 40889
+    字符——是 MAX_OUTPUT_CHARS 的两倍，而 README 把"单次输出 ≤20000 字符"列为本 server 的口径。
+    """
+    from mcp_tools import sqlite_ro
+
+    monkeypatch.setattr(sqlite_ro, "MAX_OUTPUT_CHARS", 1000)
+    db = tmp_path / "longnames.db"
+    conn = sqlite3.connect(db)
+    for i in range(200):
+        conn.execute(f'CREATE TABLE "{"t" + str(i) + "x" * 200}" (a)')
+    conn.commit()
+    conn.close()
+
+    out = sqlite_ro.list_tables(str(db))
+    assert len(out) <= 1000, f"超出总输出上限：{len(out)}"
+    assert "实际只显示了前" in out
+    shown = len([ln for ln in out.splitlines() if ln.startswith("t")])
+    assert shown < 200
+
+
+def test_describe_table_respects_row_cap(tmp_path, monkeypatch):
+    """列数很多时 describe_table 也要受 MAX_ROWS 约束（此前硬编码 truncated=False + fetchall）。"""
+    from mcp_tools import sqlite_ro
+
+    monkeypatch.setattr(sqlite_ro, "MAX_ROWS", 5)
+    db = tmp_path / "wide_cols.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE wide (" + ", ".join(f"c{i}" for i in range(20)) + ")")
+    conn.commit()
+    conn.close()
+
+    out = sqlite_ro.describe_table(str(db), "wide")
+    assert "仅显示前 5 行" in out
+    assert len(out.splitlines()) <= 7      # 表头 + 5 行列 + 1 行提示
+
+
+def test_describe_table_says_when_object_is_not_a_table(tmp_path):
+    """视图不在 `type='table'` 里，但 query_sql 能查它——措辞不能只说"表不存在"。"""
+    from mcp_tools import sqlite_ro
+
+    db = tmp_path / "view.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("CREATE TABLE t(a); CREATE VIEW v AS SELECT 1 AS a;")
+    conn.commit()
+    conn.close()
+
+    out = sqlite_ro.describe_table(str(db), "v")
+    assert "表不存在" in out and "视图" in out
+    assert "a" in sqlite_ro.query_sql(str(db), "SELECT * FROM v")
+
+
+def test_both_row_and_output_gates_fire_reports_actually_rendered_rows(tmp_path, monkeypatch):
+    """行数闸与总输出闸**同时**生效时，必须报实际渲染行数。
+
+    回归背景：`truncated` 只表示"fetchmany 取到了第 201 行"，不等于"渲染了 200 行"。
+    实测 300 行 × 143 字符的查询只渲染 134 行，提示却写"仅显示前 200 行"——
+    正是现有用例（库里只有 50 行，行数闸不触发）绕过的那条路径。
+    """
+    from mcp_tools import sqlite_ro
+
+    db = tmp_path / "both.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);")
+    conn.executemany(
+        "INSERT INTO t(id, v) VALUES (?, ?)", [(i, "y" * 143) for i in range(1, 301)]
+    )
+    conn.commit()
+    conn.close()
+
+    out = sqlite_ro.query_sql(str(db), "SELECT * FROM t")
+    shown = len(out.splitlines()) - 2      # 去掉表头与结尾提示
+    assert shown < sqlite_ro.MAX_ROWS
+    assert f"其中只有前 {shown} 行能显示" in out
+    assert "仅显示前 200 行" not in out, "只渲染了 %d 行，就不能说显示了前 200 行" % shown
+    assert len(out) <= sqlite_ro.MAX_OUTPUT_CHARS, f"总长 {len(out)} 超上限"
+
+
+def test_header_clip_is_not_reported_as_cell_clip(tmp_path, monkeypatch):
+    """列名被截断 ≠ 单元格被截断：两者必须分开说，否则模型以为数据被砍了。"""
+    from mcp_tools import sqlite_ro
+
+    monkeypatch.setattr(sqlite_ro, "MAX_CELL_CHARS", 50)
+    db = tmp_path / "hdr.db"
+    conn = sqlite3.connect(db)
+    # 40 个各 80 字符的列名：拼起来 2000+ 字符，但每个数据格只有 1 个字符
+    conn.execute("CREATE TABLE h (" + ", ".join(f'"{ "c" * 80 }{i}"' for i in range(40)) + ")")
+    conn.execute("INSERT INTO h VALUES (" + ", ".join(["1"] * 40) + ")")
+    conn.commit()
+    conn.close()
+
+    out = sqlite_ro.query_sql(str(db), "SELECT * FROM h")
+    assert "列名过长" in out
+    assert "有单元格超过" not in out, "没有任何单元格被截断"
+
+
+def test_single_too_wide_row_does_not_say_zero_rows(tmp_path, monkeypatch):
+    """单行过宽、一行都渲染不出来时，不能说"只有前 0 行能显示"。"""
+    from mcp_tools import sqlite_ro
+
+    monkeypatch.setattr(sqlite_ro, "MAX_CELL_CHARS", 200)
+    monkeypatch.setattr(sqlite_ro, "MAX_OUTPUT_CHARS", 1500)
+    db = tmp_path / "onerow.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE w (" + ", ".join(f"w{i}" for i in range(20)) + ")")
+    conn.execute(
+        "INSERT INTO w VALUES (" + ", ".join(["replace(hex(zeroblob(2000)),'0','x')"] * 20) + ")"
+    )
+    conn.commit()
+    conn.close()
+
+    out = sqlite_ro.query_sql(str(db), "SELECT * FROM w")
+    assert "前 0 行" not in out
+    assert "整行都放不下" in out
+
+
+def test_empty_result_set_is_marked_as_zero_rows(tmp_path):
+    """空结果集此前只回一行表头（`id | v`），与"一行数据、两列恰好叫 id/v"同形。"""
+    from mcp_tools import sqlite_ro
+
+    db = tmp_path / "empty.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE e(id INTEGER, v TEXT)")
+    conn.commit()
+    conn.close()
+
+    out = sqlite_ro.query_sql(str(db), "SELECT * FROM e")
+    assert out.splitlines()[0] == "id | v"
+    assert "（0 行）" in out
+
+
 def test_query_sql_clips_huge_cell_and_output(tmp_path, monkeypatch):
     """单行超大值必须被收敛：行数上限管不住"一行里一个巨大值"。
 

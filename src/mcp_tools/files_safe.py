@@ -79,8 +79,14 @@ MAX_GLOB_RESULTS = 200  # glob 结果上限；超过仅展示前 200 个并提�
 def glob_files(root: Path, pattern: str) -> str:
     """在 root 内按 glob 递归查找文件，返回相对 root 的路径列表（按字典序）。
 
-    用 pathlib.rglob（不跟随目录 symlink），命中过多时只返回前 MAX_GLOB_RESULTS 条提示
-    缩小 pattern——防止一整棵大目录被模型一条 glob 全部拉回。
+    用 pathlib.rglob（不跟随目录 symlink，命中过多时只返回前 MAX_GLOB_RESULTS 条提示
+    缩小 pattern——防止一整棵大目录被模型一条 glob 全部拉回）。
+
+    **注意 Windows junction**：junction 的 `is_symlink()` 是 False（实测），所以 rglob 会
+    把它当普通目录**照走**——"不跟随 symlink"这句话对 junction 不成立。安全结论不受影响：
+    junction 下的文件在下面第 2 道（每个命中都过 resolve_within_root）会被丢弃，
+    实测 `glob '**/*.txt'` 的结果里没有 junction 指向的外部文件。
+    写在这里是为了让后续维护者不要误以为可以省掉 per-hit 校验。
 
     安全（与 list_dir / read_file 同一闸口，两道）：
       1. pattern 本身不允许绝对路径或 `..`——pathlib 对 `..` 只做词法拼接、不 resolve，
@@ -139,7 +145,9 @@ def create_server(root: str | None = None) -> FastMCP:
     """
     root_path = Path(root or os.getenv("MCP_FILES_ROOT", ".")).resolve()
     if not root_path.is_dir():
-        raise FileNotFoundError(f"白名单根目录不存在：{root_path}")
+        # 措辞要覆盖"存在但不是目录"：只说"不存在"会把排障引向"路径写错/盘没挂"，
+        # 而真实原因可能是指向了一个文件。
+        raise FileNotFoundError(f"白名单根目录不可用（不存在或不是目录）：{root_path}")
     mcp = FastMCP("files-safe")
 
     @mcp.tool()
