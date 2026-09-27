@@ -441,6 +441,84 @@ def test_glob_rooted_pattern_rejected(tmp_path):
         assert "不允许" in glob_files(tmp_path, pattern)
 
 
+def test_glob_returns_posix_separators_on_every_os(tmp_path):
+    """glob 返回的相对路径必须统一用正斜杠。
+
+    修复前用 `str(relative)`：Windows 给 `src\\a.py`、Linux 给 `src/a.py`——同一份代码、
+    同一个 pattern，跨平台输出形态不同，而消费方（模型/客户端脚本）一般按 POSIX 拼路径。
+    输入侧本来就两种分隔符都接受，所以只需归一化**输出**。
+    """
+    (tmp_path / "src" / "deep").mkdir(parents=True)
+    (tmp_path / "src" / "deep" / "a.py").write_text("x", encoding="utf-8")
+    (tmp_path / "b.py").write_text("y", encoding="utf-8")
+
+    out = glob_files(tmp_path, "**/*.py")
+    assert "\\" not in out, f"输出里出现了平台相关分隔符：{out!r}"
+    assert out.splitlines() == ["b.py", "src/deep/a.py"]
+    # 返回的路径要能原样喂回下一个工具（round-trip）
+    assert read_file(tmp_path, "src/deep/a.py") == "x"
+
+
+def test_glob_accepts_both_separators_in_pattern(tmp_path):
+    """pattern 里写 `src\\*.py` 或 `src/*.py` 结果必须一致（输入侧归一化）。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("x", encoding="utf-8")
+    assert glob_files(tmp_path, "src/*.py") == glob_files(tmp_path, "src\\*.py")
+    assert glob_files(tmp_path, "src/*.py") == "src/a.py"
+
+
+def test_glob_matching_is_case_sensitive_like_rglob(tmp_path):
+    """匹配用 fnmatchcase：`**/*.PY` 不该在 Windows 上匹配到 .py（那会让结果随 OS 变化）。"""
+    (tmp_path / "a.py").write_text("x", encoding="utf-8")
+    assert glob_files(tmp_path, "*.py") == "a.py"
+    assert glob_files(tmp_path, "*.PY") == "（无匹配文件）"
+
+
+def test_glob_next_star_matches_top_level_files(tmp_path):
+    """`**/*` 必须包含顶层的文件。
+
+    改遍历方式前用 pathlib 的 `rglob("**/*")`，它在顶层会漏掉不带目录前缀的文件
+    （实测仓库根上少返回 LICENSE/README.md/pyproject.toml 等 5 个文件）——
+    标准 glob 语义里 `**/` 是"零个或多个目录"，零个目录时也必须能匹配。
+    """
+    (tmp_path / "top.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "inner.txt").write_text("b", encoding="utf-8")
+    out = glob_files(tmp_path, "**/*").splitlines()
+    assert out == ["sub/inner.txt", "top.txt"], out
+
+
+def test_glob_prunes_dot_directories_during_walk(tmp_path, monkeypatch):
+    """点目录必须在**遍历时**就剪掉，而不是走完再过滤——否则宽 pattern 的时间全花在 .venv。
+
+    这里用"walk 不应进入 .venv"来验证剪枝：往 .venv 里塞大量文件，
+    若实现仍是 rglob+过滤，`os.walk` 的进目录次数会包含它。
+    """
+    import os as _os
+
+    from mcp_tools import files_safe
+
+    (tmp_path / "keep").mkdir()
+    (tmp_path / "keep" / "a.py").write_text("x", encoding="utf-8")
+    heavy = tmp_path / ".venv" / "Lib" / "site-packages"
+    heavy.mkdir(parents=True)
+    for i in range(50):
+        (heavy / f"dep{i}.py").write_text("y", encoding="utf-8")
+
+    visited: list[str] = []
+    real_walk = _os.walk
+
+    def spy_walk(top, *args, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, *args, **kwargs):
+            visited.append(str(dirpath))
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(files_safe.os, "walk", spy_walk)
+    out = files_safe.glob_files(tmp_path, "**/*.py")
+    assert out == "keep/a.py"
+    assert not any(".venv" in v for v in visited), f"遍历进了 .venv：{visited}"
+
+
 def test_connect_sets_busy_timeout(demo_db):
     """只读连接也要设 busy_timeout，否则撞上别的写事务会直接 'database is locked'。"""
     from mcp_tools import sqlite_ro

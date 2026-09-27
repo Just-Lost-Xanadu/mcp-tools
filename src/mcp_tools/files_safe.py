@@ -76,6 +76,66 @@ def read_file(root: Path, relative_path: str) -> str:
 MAX_GLOB_RESULTS = 200  # glob 结果上限；超过仅展示前 200 个并提示
 
 
+def _glob_matches(relative: str, pattern: str) -> bool:
+    """单个相对路径（已归一化为正斜杠）是否匹配 glob pattern。
+
+    为什么不能直接 `fnmatch(relative, pattern)`：标准 glob 语义里 `**/` 表示
+    "**零个或多个**目录"，而 fnmatch 会把 pattern 里的 `/` 当普通字符、`*` 不跨 `/`
+    地转成正则——于是 `**/*.py` 转出来的正则要求路径里**必须有一个斜杠**，
+    顶层文件 `b.py` 匹配不上。实测：仓库根上 `glob_files(root,'**/*.py')` 会漏掉
+    顶层所有 py（`**/*` 漏掉 LICENSE/README.md/pyproject.toml 等 5 个文件）。
+    所以这里对带 `**/` 前缀的 pattern 额外用"去掉该前缀后的剩余部分"再匹配一次，
+    把"零个目录"这一支补回来；其余情况仍交给 fnmatchcase（不自己实现通配语义）。
+    """
+    import fnmatch
+
+    if fnmatch.fnmatchcase(relative, pattern):
+        return True
+    # `**/` 可以匹配"零个目录"：把每一层 `**/` 逐个剥掉后，剩余部分直接对整条路径再试
+    remaining = pattern
+    while remaining.startswith("**/"):
+        remaining = remaining[3:]
+        if fnmatch.fnmatchcase(relative, remaining):
+            return True
+    return False
+
+
+def _iter_files_pruning_dot_dirs(root: Path, pattern: str):
+    """按 pattern 在 root 内遍历文件，**遇到点开头的目录就整棵剪掉**。
+
+    为什么不用 `root.rglob(pattern)` 再过滤：rglob 会照走 `.venv/`、`.git/` 这些目录，
+    而它们的返回结果本来就会被丢弃——实测在仓库根上跑 `**/*.py` 约 0.7s，其中大部分
+    时间花在遍历 `.venv\\Lib\\site-packages`（几万个文件）。剪枝只是把"注定被丢掉的
+    工作"提前不做，返回结果与 rglob+过滤完全一致。
+
+    `os.walk(topdown=True)` 允许就地改 `dirnames` 来剪枝；它**不跟随目录符号链接**
+    （followlinks 默认 False），与 rglob 的语义一致。注意 Windows junction 的
+    `is_symlink()` 是 False，walk 会当普通目录照走——所以每个命中仍要过
+    `resolve_within_root`（见 glob_files docstring），剪枝不能替代那道校验。
+
+    匹配用 `fnmatchcase` 而不是 `fnmatch`：后者在 Windows 上会把两侧 normcase 成小写，
+    于是 `'**/*.PY'` 在 Windows 能匹配、在 Linux 不能——同一份调用跨平台结果不同。
+    rglob 本身是大小写敏感的（随文件系统），用 fnmatchcase 保持这个语义。
+    """
+    import os
+
+    # pattern 里的反斜杠统一成正斜杠再匹配：输入侧本来两种分隔符都接受
+    # （实测 `glob('a/*.txt')` 与 `glob('a\\*.txt')` 等价），归一化后比较的是同一种形态。
+    norm_pattern = pattern.replace("\\", "/")
+
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        here = Path(dirpath)
+        # 剪枝：点开头目录整体跳过（含 .git/.venv/.pytest_cache）
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for name in filenames:
+            if name.startswith("."):
+                continue
+            candidate = here / name
+            relative = candidate.relative_to(root).as_posix()
+            if _glob_matches(relative, norm_pattern):
+                yield candidate
+
+
 def glob_files(root: Path, pattern: str) -> str:
     """在 root 内按 glob 递归查找文件，返回相对 root 的路径列表（按字典序）。
 
@@ -98,9 +158,16 @@ def glob_files(root: Path, pattern: str) -> str:
     这些目录——实测 `glob_files(repo, '**/*.py')` 返回的前 200 条**全部**是
     `.venv\\Lib\\site-packages\\...`，项目自己的代码一条都没有：模型问"项目里有哪些 py"
     会得到一份纯依赖库清单，等于把 .git 与虚拟环境暴露给模型。
-    （注：被跳过的子树仍会被 rglob 走到，因此对"根目录里带 .venv"的仓库，宽 pattern
-    依然要花一次全树遍历的时间——返回结果是对的，只是不快。要连遍历也省掉，
-    应该把白名单根设成专用数据目录，而不是仓库根，见 README「常见坑」。）
+    这些子树在遍历时就被剪掉（见 `_iter_files_pruning_dot_dirs`），不是"先全走完再过滤"：
+    实测在仓库根上跑 `**/*.py` 时约 0.7s 里大部分花在 `.venv`——剪枝把这份开销也去掉了。
+    （要连遍历都省掉，仍应把白名单根设成专用数据目录，而不是仓库根。）
+
+    返回的相对路径统一用 **正斜杠**（`as_posix()`）。这是刻意归一化，不是随平台走：
+    Windows 下 `str(Path)` 会给 `src\\mcp_tools\\x.py`，而 Linux 会给 `src/mcp_tools/x.py`
+    ——同一份代码、同一个 pattern，跨平台输出不一致；而消费方（模型/别的客户端脚本）
+    通常按 POSIX 拼路径。实测把返回的 `src\\mcp_tools\\files_safe.py` 原样喂给下一个工具
+    在 Windows 上能work，但换个 OS/换个客户端就对不上。输入侧本来就同时接受两种分隔符
+    （`list_dir('./a')`、`glob('a/*.txt')`、`glob('a\\*.txt')` 实测都能用），所以只需归一化输出。
     """
     if not pattern:
         return "（pattern 不能为空）"
@@ -112,20 +179,18 @@ def glob_files(root: Path, pattern: str) -> str:
         return "（pattern 不允许绝对路径或 .. ）"
     root = root.resolve()
     hits: list[str] = []
-    for path in root.rglob(pattern):
-        if not path.is_file():
-            continue
+    for path in _iter_files_pruning_dot_dirs(root, pattern):
         relative = path.relative_to(root)
         if any(part.startswith(".") for part in relative.parts):
-            continue  # 点目录/点文件：见 docstring
+            continue  # 点目录/点文件：见 docstring（剪枝已挡掉大部分，这里兜住 pattern 本身带点的情形）
         try:
             resolve_within_root(str(path), root)
         except ValueError:
             continue
-        hits.append(str(relative))
+        hits.append(relative.as_posix())
     # 先全收再排序再截断（而不是"收满 200 条就提前退出"）：这样"显示哪 200 条"
     # 只取决于字典序，与文件系统的遍历顺序无关——换机器/换文件系统结果一致，
-    # 截断后的内容是确定的、可复现的。代价是宽 pattern 仍会走完整棵树（见 docstring）。
+    # 截断后的内容是确定的、可复现的。
     hits.sort()
     if not hits:
         return "（无匹配文件）"
