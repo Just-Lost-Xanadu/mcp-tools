@@ -23,21 +23,22 @@ async def main() -> None:
         args=["-m", "mcp_tools.sqlite_ro"],
         cwd=str(ROOT),
     )
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await session.list_tools()
-            names = [t.name for t in tools.tools]
-            print("可用工具:", names)
-            result = await session.call_tool(
-                "query_sql_tool",
-                {"sql": "SELECT r.name AS region, SUM(o.amount) AS sales FROM orders o "
-                        "JOIN regions r ON r.id = o.region_id GROUP BY r.name ORDER BY sales DESC"},
-            )
-            if result.isError:  # 不看这个标志的话，工具报错也会被当成查询结果打印出来
-                raise SystemExit(f"工具调用失败：{[getattr(c, 'text', c) for c in result.content]}")
-            for item in result.content:
-                print("查询结果:\n", item.text)
+    # 两个上下文合并成一条 with：ClientSession 的生命周期本就依附于 stdio_client，
+    # 嵌套写法不增加任何安全性，只是把可读性拉低一层缩进。
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        tools = await session.list_tools()
+        names = [t.name for t in tools.tools]
+        print("可用工具:", names)
+        result = await session.call_tool(
+            "query_sql_tool",
+            {"sql": "SELECT r.name AS region, SUM(o.amount) AS sales FROM orders o "
+                    "JOIN regions r ON r.id = o.region_id GROUP BY r.name ORDER BY sales DESC"},
+        )
+        if result.isError:  # 不看这个标志的话，工具报错也会被当成查询结果打印出来
+            raise SystemExit(f"工具调用失败：{[getattr(c, 'text', c) for c in result.content]}")
+        for item in result.content:
+            print("查询结果:\n", item.text)
 
 
 if __name__ == "__main__":

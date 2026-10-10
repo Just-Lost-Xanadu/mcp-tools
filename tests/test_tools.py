@@ -6,7 +6,7 @@ import pytest
 
 from mcp_tools.files_safe import glob_files, list_dir, read_file
 from mcp_tools.security import resolve_within_root, validate_readonly_sql
-from mcp_tools.sqlite_ro import list_tables, query_sql, describe_table
+from mcp_tools.sqlite_ro import describe_table, list_tables, query_sql
 
 
 # ---------- 只读 SQL 守卫 ----------
@@ -277,7 +277,7 @@ def test_both_row_and_output_gates_fire_reports_actually_rendered_rows(tmp_path,
     shown = len(out.splitlines()) - 2      # 去掉表头与结尾提示
     assert shown < sqlite_ro.MAX_ROWS
     assert f"其中只有前 {shown} 行能显示" in out
-    assert "仅显示前 200 行" not in out, "只渲染了 %d 行，就不能说显示了前 200 行" % shown
+    assert "仅显示前 200 行" not in out, f"只渲染了 {shown} 行，就不能说显示了前 200 行"
     assert len(out) <= sqlite_ro.MAX_OUTPUT_CHARS, f"总长 {len(out)} 超上限"
 
 
