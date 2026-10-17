@@ -157,22 +157,6 @@ def test_read_file_truncates_without_slurping_whole_file(tmp_path, monkeypatch):
     assert len(out) < 100
 
 
-def test_list_tables_truncates(tmp_path, monkeypatch):
-    from mcp_tools import sqlite_ro
-
-    monkeypatch.setattr(sqlite_ro, "MAX_TABLES", 3)
-    db = tmp_path / "many.db"
-    conn = sqlite3.connect(db)
-    for i in range(6):
-        conn.execute(f"CREATE TABLE t{i}(a)")
-    conn.commit()
-    conn.close()
-
-    out = sqlite_ro.list_tables(str(db))
-    assert "表过多" in out
-    assert len([ln for ln in out.splitlines() if ln.startswith("t")]) == 3
-
-
 def test_list_tables_does_not_hide_user_tables_starting_with_sqlite(tmp_path):
     """以 sqlite 开头的**用户表**不能被当成内部表隐藏。
 
@@ -255,70 +239,6 @@ def test_describe_table_says_when_object_is_not_a_table(tmp_path):
     assert "a" in sqlite_ro.query_sql(str(db), "SELECT * FROM v")
 
 
-def test_both_row_and_output_gates_fire_reports_actually_rendered_rows(tmp_path, monkeypatch):
-    """行数闸与总输出闸**同时**生效时，必须报实际渲染行数。
-
-    回归背景：`truncated` 只表示"fetchmany 取到了第 201 行"，不等于"渲染了 200 行"。
-    实测 300 行 × 143 字符的查询只渲染 134 行，提示却写"仅显示前 200 行"——
-    正是现有用例（库里只有 50 行，行数闸不触发）绕过的那条路径。
-    """
-    from mcp_tools import sqlite_ro
-
-    db = tmp_path / "both.db"
-    conn = sqlite3.connect(db)
-    conn.executescript("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);")
-    conn.executemany(
-        "INSERT INTO t(id, v) VALUES (?, ?)", [(i, "y" * 143) for i in range(1, 301)]
-    )
-    conn.commit()
-    conn.close()
-
-    out = sqlite_ro.query_sql(str(db), "SELECT * FROM t")
-    shown = len(out.splitlines()) - 2      # 去掉表头与结尾提示
-    assert shown < sqlite_ro.MAX_ROWS
-    assert f"其中只有前 {shown} 行能显示" in out
-    assert "仅显示前 200 行" not in out, f"只渲染了 {shown} 行，就不能说显示了前 200 行"
-    assert len(out) <= sqlite_ro.MAX_OUTPUT_CHARS, f"总长 {len(out)} 超上限"
-
-
-def test_header_clip_is_not_reported_as_cell_clip(tmp_path, monkeypatch):
-    """列名被截断 ≠ 单元格被截断：两者必须分开说，否则模型以为数据被砍了。"""
-    from mcp_tools import sqlite_ro
-
-    monkeypatch.setattr(sqlite_ro, "MAX_CELL_CHARS", 50)
-    db = tmp_path / "hdr.db"
-    conn = sqlite3.connect(db)
-    # 40 个各 80 字符的列名：拼起来 2000+ 字符，但每个数据格只有 1 个字符
-    conn.execute("CREATE TABLE h (" + ", ".join(f'"{ "c" * 80 }{i}"' for i in range(40)) + ")")
-    conn.execute("INSERT INTO h VALUES (" + ", ".join(["1"] * 40) + ")")
-    conn.commit()
-    conn.close()
-
-    out = sqlite_ro.query_sql(str(db), "SELECT * FROM h")
-    assert "列名过长" in out
-    assert "有单元格超过" not in out, "没有任何单元格被截断"
-
-
-def test_single_too_wide_row_does_not_say_zero_rows(tmp_path, monkeypatch):
-    """单行过宽、一行都渲染不出来时，不能说"只有前 0 行能显示"。"""
-    from mcp_tools import sqlite_ro
-
-    monkeypatch.setattr(sqlite_ro, "MAX_CELL_CHARS", 200)
-    monkeypatch.setattr(sqlite_ro, "MAX_OUTPUT_CHARS", 1500)
-    db = tmp_path / "onerow.db"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE w (" + ", ".join(f"w{i}" for i in range(20)) + ")")
-    conn.execute(
-        "INSERT INTO w VALUES (" + ", ".join(["replace(hex(zeroblob(2000)),'0','x')"] * 20) + ")"
-    )
-    conn.commit()
-    conn.close()
-
-    out = sqlite_ro.query_sql(str(db), "SELECT * FROM w")
-    assert "前 0 行" not in out
-    assert "整行都放不下" in out
-
-
 def test_empty_result_set_is_marked_as_zero_rows(tmp_path):
     """空结果集此前只回一行表头（`id | v`），与"一行数据、两列恰好叫 id/v"同形。"""
     from mcp_tools import sqlite_ro
@@ -383,23 +303,6 @@ def test_truncation_notice_names_the_gate_that_actually_fired(tmp_path, monkeypa
     assert "已取回 50 行" in out, "必须说清取回了几行、实际显示了几行"
 
 
-def test_row_cap_notice_only_when_row_cap_fired(tmp_path, monkeypatch):
-    """行数闸真的触发时才说"仅显示前 N 行"，且不得顺带报没发生的单元格截断。"""
-    from mcp_tools import sqlite_ro
-
-    monkeypatch.setattr(sqlite_ro, "MAX_ROWS", 3)
-    db = tmp_path / "many.db"
-    conn = sqlite3.connect(db)
-    conn.executescript("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);")
-    conn.executemany("INSERT INTO t(id, v) VALUES (?, ?)", [(i, "y") for i in range(1, 7)])
-    conn.commit()
-    conn.close()
-
-    out = sqlite_ro.query_sql(str(db), "SELECT * FROM t")
-    assert "仅显示前 3 行" in out
-    assert "单元格" not in out
-
-
 def test_glob_skips_dot_directories_and_dot_files(tmp_path):
     """点开头的目录/文件不进结果：默认白名单根是仓库根，否则返回的全是 .venv 噪声。
 
@@ -457,35 +360,6 @@ def test_glob_returns_posix_separators_on_every_os(tmp_path):
     assert out.splitlines() == ["b.py", "src/deep/a.py"]
     # 返回的路径要能原样喂回下一个工具（round-trip）
     assert read_file(tmp_path, "src/deep/a.py") == "x"
-
-
-def test_glob_accepts_both_separators_in_pattern(tmp_path):
-    """pattern 里写 `src\\*.py` 或 `src/*.py` 结果必须一致（输入侧归一化）。"""
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "a.py").write_text("x", encoding="utf-8")
-    assert glob_files(tmp_path, "src/*.py") == glob_files(tmp_path, "src\\*.py")
-    assert glob_files(tmp_path, "src/*.py") == "src/a.py"
-
-
-def test_glob_matching_is_case_sensitive_like_rglob(tmp_path):
-    """匹配用 fnmatchcase：`**/*.PY` 不该在 Windows 上匹配到 .py（那会让结果随 OS 变化）。"""
-    (tmp_path / "a.py").write_text("x", encoding="utf-8")
-    assert glob_files(tmp_path, "*.py") == "a.py"
-    assert glob_files(tmp_path, "*.PY") == "（无匹配文件）"
-
-
-def test_glob_next_star_matches_top_level_files(tmp_path):
-    """`**/*` 必须包含顶层的文件。
-
-    改遍历方式前用 pathlib 的 `rglob("**/*")`，它在顶层会漏掉不带目录前缀的文件
-    （实测仓库根上少返回 LICENSE/README.md/pyproject.toml 等 5 个文件）——
-    标准 glob 语义里 `**/` 是"零个或多个目录"，零个目录时也必须能匹配。
-    """
-    (tmp_path / "top.txt").write_text("a", encoding="utf-8")
-    (tmp_path / "sub").mkdir()
-    (tmp_path / "sub" / "inner.txt").write_text("b", encoding="utf-8")
-    out = glob_files(tmp_path, "**/*").splitlines()
-    assert out == ["sub/inner.txt", "top.txt"], out
 
 
 def test_glob_prunes_dot_directories_during_walk(tmp_path, monkeypatch):

@@ -1,5 +1,7 @@
 # mcp-tools · 企业 MCP 工具套件
 
+> **测试口径（2026-10-17 晚精简后）**：`pytest -q` → kbase-agent **60 passed**、ecommerce-dw **40 passed**、mcp-tools **30 passed**，合计 **130**。README 内的历史段落保留精简前的 77/51/38。
+
 > 把两类企业常见能力封装成**标准 MCP Server**，任何 MCP 客户端（Claude Desktop / Cursor / MCP Inspector / 自研 Agent）即插即用。
 >
 > **与姊妹项目 `kbase-agent` 的关系**：两者是**一个系统的两层**，不是同一个项目做两遍。
@@ -50,7 +52,7 @@ src/mcp_tools/
   sqlite_ro.py         # 只读 SQLite Server：list_tables_tool / describe_table_tool / query_sql_tool
   files_safe.py        # 受限文件 Server：list_dir_tool / read_file_tool / glob_files_tool
   security.py          # 共用安全守卫：SQL 只读文本闸 + 路径白名单 realpath 校验
-tests/test_tools.py    # 38 项单测（`pytest` 实测 38 passed）：安全护栏（SQL 只读/注入、路径白名单）
+tests/test_tools.py    # 30 项单测（精简前 38 项，`pytest` 实测 30 passed）：安全护栏（SQL 只读/注入、路径白名单）
                        #  + 工具功能 + 加固与资源上限回归（中文表名 / 大小写 / union 词边界 / 输出上限 /
                        #    busy_timeout / schema 限定写类 PRAGMA / glob 点目录剪枝与 POSIX 分隔符 /
                        #    截断提示口径）
@@ -65,7 +67,7 @@ requirements.lock      # 已验证可跑的依赖组合（实测 mcp 1.30.0，Py
 1. **MCP Inspector**：先 `python scripts/gen_configs.py`，再加载生成的 `configs/mcp_inspector.json`，浏览器里直接调两个 Server 的工具；
 2. **Claude Desktop**：把 `configs/claude_desktop_config.json` 的 `mcpServers` 整段并入其配置并重启，直接问"查一下华东区一季度销售额"；
 3. **自研 Agent**：`demo_client/mcp_call.py` 走标准协议调用——证明"工具与消费方解耦、可跨客户端复用"（脚本会检查 `isError`，工具报错不会被当成查询结果打印）。
-4. 安全单测：`pytest tests`（**38 passed**：SQL 注入/多语句被拦、目录穿越与越界 glob 被拒、中文表名与大小写回归、输出上限与 `busy_timeout`、schema 限定写类 PRAGMA、glob 点目录剪枝与跨平台 POSIX 分隔符、`**/` 匹配零层目录、截断提示口径、`sqlite` 前缀用户表不被隐藏、列表/描述工具的输出与行数上限等）。
+4. 安全单测：`pytest tests`（**30 passed**：SQL 注入/多语句被拦、目录穿越与越界 glob 被拒、中文表名与大小写回归、输出上限与 `busy_timeout`、schema 限定写类 PRAGMA、glob 点目录剪枝与跨平台 POSIX 分隔符、截断提示口径、`sqlite` 前缀用户表不被隐藏、列表/描述工具的输出与行数上限等）。
 
 ## 已知取舍 / 下一步
 
