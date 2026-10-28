@@ -1,6 +1,6 @@
 # mcp-tools · 企业 MCP 工具套件
 
-> **测试口径（2026-10-17 晚精简后）**：`pytest -q` → kbase-agent **60 passed**、ecommerce-dw **40 passed**、mcp-tools **30 passed**，合计 **130**。README 内的历史段落保留精简前的 77/51/38。
+> **测试口径（2026-10-28 复核，与 kbase-agent / ecommerce-dw 两个 README 一致）**：`pytest -q` → kbase-agent **40 passed**、ecommerce-dw **32 passed**、mcp-tools **30 passed**，合计 **102**。README 内的历史段落保留更早的 77/51/38、60/40/30（=130）等记录，不再作为当前口径引用。
 
 > 把两类企业常见能力封装成**标准 MCP Server**，任何 MCP 客户端（Claude Desktop / Cursor / MCP Inspector / 自研 Agent）即插即用。
 >
@@ -85,6 +85,7 @@ requirements.lock      # 已验证可跑的依赖组合（实测 mcp 1.30.0，Py
   - 默认根是**当前工作目录**，而 `scripts/gen_configs.py` 生成的配置把 `MCP_FILES_ROOT` 设成**仓库根**——于是 `list_dir` 会列出 `.git/`、`.venv/`，`read_file` 也能读到它们（都在根内，不算越权）；
   - `glob_files` 已排除点开头路径（避免返回一屏 `.venv` 依赖），且**在遍历时就剪掉这些子树**（不是"走完再过滤"：实测仓库根上 `**/*.py` 由约 590ms 降到约 12ms、`**/*` 由约 1600ms 降到约 30ms），但**这只是一条"结果过滤"，不是权限**——真正的边界始终是白名单根；
   - 真实使用时应把 `MCP_FILES_ROOT` 指到一个**专用数据目录**，而不是仓库根。演示里用仓库根只是为了让 clone 下来即可跑，README 在此如实说明。
+  - **glob 的 `*` 会匹配 `/`**（实现用 `fnmatchcase` 对整条相对路径匹配），所以 `*.py` 等价于"递归匹配所有 py"，不是 shell glob 的"仅当前目录"。本工具始终在 root 内递归遍历、pattern 只做结果过滤；要只看一层请用 `list_dir`。`**/` 额外补了"零个目录"分支，因此 `**/*.py` 能命中顶层文件。
 - 下一步方向：动态工具注册 / 集成到一号项目作为其 MCP 工具源，暂不实现。
 
 ## 常见坑

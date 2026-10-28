@@ -79,13 +79,17 @@ MAX_GLOB_RESULTS = 200  # glob 结果上限；超过仅展示前 200 个并提�
 def _glob_matches(relative: str, pattern: str) -> bool:
     """单个相对路径（已归一化为正斜杠）是否匹配 glob pattern。
 
-    为什么不能直接 `fnmatch(relative, pattern)`：标准 glob 语义里 `**/` 表示
-    "**零个或多个**目录"，而 fnmatch 会把 pattern 里的 `/` 当普通字符、`*` 不跨 `/`
-    地转成正则——于是 `**/*.py` 转出来的正则要求路径里**必须有一个斜杠**，
-    顶层文件 `b.py` 匹配不上。实测：仓库根上 `glob_files(root,'**/*.py')` 会漏掉
-    顶层所有 py（`**/*` 漏掉 LICENSE/README.md/pyproject.toml 等 5 个文件）。
+    为什么不能直接只用 `fnmatch(relative, pattern)`：标准 glob 语义里 `**/` 表示
+    "**零个或多个**目录"，而 fnmatch 把整条相对路径当作普通字符串匹配，`**/...`
+    转成正则后要求路径里**必须有一个斜杠**，于是顶层文件 `b.py` 匹配不上。
+    实测：仓库根上 `glob_files(root,'**/*.py')` 会漏掉顶层所有 py
+    （`**/*` 漏掉 LICENSE/README.md/pyproject.toml 等 5 个文件）。
     所以这里对带 `**/` 前缀的 pattern 额外用"去掉该前缀后的剩余部分"再匹配一次，
     把"零个目录"这一支补回来；其余情况仍交给 fnmatchcase（不自己实现通配语义）。
+
+    注意 fnmatch 的 `*` **会**匹配 `/`：因此 `*.py` 在本工具里等价于"递归匹配所有
+    py"，而不是标准 shell glob 的"仅当前目录"。本工具始终在 root 内递归遍历，
+    pattern 只做结果过滤；要"只看一层"请用 `list_dir`，或在消费方对返回路径过滤。
     """
     import fnmatch
 
