@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -18,10 +19,17 @@ from mcp.client.stdio import stdio_client
 
 
 async def main() -> None:
+    # 父进程改 sys.path 只影响父进程；stdio 子进程要单独把 src/ 放进 PYTHONPATH，
+    # 否则"没 pip install -e ."时本脚本自己 import 得到、子进程却 ModuleNotFoundError。
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(ROOT / "src"), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "mcp_tools.sqlite_ro"],
         cwd=str(ROOT),
+        env=env,
     )
     # 两个上下文合并成一条 with：ClientSession 的生命周期本就依附于 stdio_client，
     # 嵌套写法不增加任何安全性，只是把可读性拉低一层缩进。

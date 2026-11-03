@@ -25,7 +25,9 @@
 环境变量：MCP_FILES_ROOT（默认当前目录）
 """
 
+import heapq
 import os
+import stat
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -34,6 +36,9 @@ from .security import resolve_within_root
 
 MAX_READ_CHARS = 200_000  # 单次读取上限（字符）；按流读取，不会先把整个文件读进内存
 MAX_LIST_ENTRIES = 200    # list_dir 结果上限；与 glob/query 的行数上限保持一致的收敛口径
+# 输出字符预算：只限条数挡不住"200 个超长文件名/路径"把上下文挤爆。
+# 与 sqlite_ro / list_tables 的 20000 字符口径保持一致。
+MAX_OUTPUT_CHARS = 20_000
 
 
 def list_dir(root: Path, relative_dir: str = ".") -> str:
@@ -45,14 +50,35 @@ def list_dir(root: Path, relative_dir: str = ".") -> str:
     target = resolve_within_root(relative_dir, root)
     if not target.is_dir():
         return f"不是目录：{relative_dir}"
-    items = sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())
+    # 用 nsmallest 流式取字典序前 N+1 项：sorted(iterdir()) 会先把超大目录的**全部**
+    # 条目建成列表，等于在"限制输出"之前先把内存占满。多取 1 项只用于判断是否截断。
+    items = heapq.nsmallest(
+        MAX_LIST_ENTRIES + 1,
+        (p.name + ("/" if p.is_dir() else "") for p in target.iterdir()),
+    )
     if not items:
         return "（空目录）"
-    if len(items) > MAX_LIST_ENTRIES:
-        return "\n".join(items[:MAX_LIST_ENTRIES]) + (
-            f"\n...（条目过多，仅显示前 {MAX_LIST_ENTRIES} 个，请指明更具体的子目录）"
+    truncated = len(items) > MAX_LIST_ENTRIES
+    items = items[:MAX_LIST_ENTRIES]
+    budget = MAX_OUTPUT_CHARS - 200   # 给结尾提示行留位置
+    lines: list[str] = []
+    used = 0
+    for item in items:
+        if used + len(item) + 1 > budget:
+            break
+        lines.append(item)
+        used += len(item) + 1
+    text = "\n".join(lines)
+    notes: list[str] = []
+    if len(lines) < len(items):
+        notes.append(
+            f"受 {MAX_OUTPUT_CHARS} 字符上限所限，实际只显示了前 {len(lines)} 个"
         )
-    return "\n".join(items)
+    if truncated:
+        notes.append(f"条目过多，仅显示前 {MAX_LIST_ENTRIES} 个，请指明更具体的子目录")
+    if notes:
+        text += "\n...（" + "；".join(notes) + "）"
+    return text
 
 
 def read_file(root: Path, relative_path: str) -> str:
@@ -93,15 +119,43 @@ def _glob_matches(relative: str, pattern: str) -> bool:
     """
     import fnmatch
 
-    if fnmatch.fnmatchcase(relative, pattern):
-        return True
-    # `**/` 可以匹配"零个目录"：把每一层 `**/` 逐个剥掉后，剩余部分直接对整条路径再试
-    remaining = pattern
-    while remaining.startswith("**/"):
-        remaining = remaining[3:]
-        if fnmatch.fnmatchcase(relative, remaining):
+    # `**/` 可以匹配"零个或多个目录"。只剥离**开头**的 `**/` 不够：
+    # `src/**/*.py` 里的 `**/` 同样应该能匹配零层，即 `src/a.py` 也该命中。
+    # 这里对每一处 `**/` 生成"保留 / 去掉"两种变体，再逐个用 fnmatch 判断。
+    # 变体数上限防住恶意 pattern 的指数膨胀（超过 1024 种就只用原 pattern）。
+    variants: set[str] = {pattern}
+    for _ in range(pattern.count("**/")):
+        expanded = set(variants)
+        for item in variants:
+            idx = item.find("**/")
+            if idx >= 0:
+                expanded.add(item[:idx] + item[idx + 3 :])
+        variants = expanded
+        if len(variants) > 1024:
+            variants = {pattern}
+            break
+    return any(fnmatch.fnmatchcase(relative, item) for item in variants)
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    """目录项是否符号链接 / Windows junction（reparse point）。
+
+    `os.walk(... followlinks=False)` 只挡符号链接，**挡不住 junction**
+    （Windows junction 的 is_symlink() 是 False）。若不在这里剪掉，root 内一个指向
+    C:\\ 或祖先目录的 junction 会让遍历走进整棵外部树，而且可能形成环。
+    per-hit 的 resolve_within_root 只负责"丢弃结果"，遍历成本已经付出。
+    """
+    try:
+        if os.path.islink(path):
             return True
-    return False
+        isjunction = getattr(os.path, "isjunction", None)
+        if callable(isjunction) and isjunction(path):
+            return True
+        st = os.lstat(path)
+        attrs = getattr(st, "st_file_attributes", 0)
+        return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+    except OSError:
+        return True
 
 
 def _iter_files_pruning_dot_dirs(root: Path, pattern: str):
@@ -129,8 +183,13 @@ def _iter_files_pruning_dot_dirs(root: Path, pattern: str):
 
     for dirpath, dirnames, filenames in os.walk(root, topdown=True):
         here = Path(dirpath)
-        # 剪枝：点开头目录整体跳过（含 .git/.venv/.pytest_cache）
-        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        # 剪枝：点开头目录整体跳过（含 .git/.venv/.pytest_cache）；
+        # 链接/junction 也整体跳过，避免遍历到白名单外面（见 _is_link_or_junction）。
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if not d.startswith(".") and not _is_link_or_junction(here / d)
+        ]
         for name in filenames:
             if name.startswith("."):
                 continue
@@ -182,27 +241,45 @@ def glob_files(root: Path, pattern: str) -> str:
     if raw.is_absolute() or raw.drive or raw.root or ".." in raw.parts:
         return "（pattern 不允许绝对路径或 .. ）"
     root = root.resolve()
-    hits: list[str] = []
-    for path in _iter_files_pruning_dot_dirs(root, pattern):
-        relative = path.relative_to(root)
-        if any(part.startswith(".") for part in relative.parts):
-            continue  # 点目录/点文件：见 docstring（剪枝已挡掉大部分，这里兜住 pattern 本身带点的情形）
-        try:
-            resolve_within_root(str(path), root)
-        except ValueError:
-            continue
-        hits.append(relative.as_posix())
-    # 先全收再排序再截断（而不是"收满 200 条就提前退出"）：这样"显示哪 200 条"
-    # 只取决于字典序，与文件系统的遍历顺序无关——换机器/换文件系统结果一致，
-    # 截断后的内容是确定的、可复现的。
-    hits.sort()
+
+    def _matched():
+        for path in _iter_files_pruning_dot_dirs(root, pattern):
+            relative = path.relative_to(root)
+            if any(part.startswith(".") for part in relative.parts):
+                continue  # 点目录/点文件：见 docstring（剪枝已挡掉大部分，这里兜住 pattern 本身带点的情形）
+            try:
+                resolve_within_root(str(path), root)
+            except ValueError:
+                continue
+            yield relative.as_posix()
+
+    # 用 nsmallest 只保留字典序前 MAX+1 条，而不是把命中**全部**收进列表再排序：
+    # 白名单根指向几十万文件的目录时，旧写法会在"截断输出"之前先占满内存/时间。
+    # 多取 1 条只用于判断是否还有更多；结果仍只取决于字典序，与遍历顺序无关。
+    hits = heapq.nsmallest(MAX_GLOB_RESULTS + 1, _matched())
     if not hits:
         return "（无匹配文件）"
-    if len(hits) > MAX_GLOB_RESULTS:
-        return "\n".join(hits[:MAX_GLOB_RESULTS]) + (
-            f"\n...（命中过多，仅显示前 {MAX_GLOB_RESULTS} 个，请用更精确的 pattern）"
+    truncated = len(hits) > MAX_GLOB_RESULTS
+    hits = hits[:MAX_GLOB_RESULTS]
+    budget = MAX_OUTPUT_CHARS - 200
+    lines: list[str] = []
+    used = 0
+    for hit in hits:
+        if used + len(hit) + 1 > budget:
+            break
+        lines.append(hit)
+        used += len(hit) + 1
+    text = "\n".join(lines)
+    notes: list[str] = []
+    if len(lines) < len(hits):
+        notes.append(
+            f"受 {MAX_OUTPUT_CHARS} 字符上限所限，实际只显示了前 {len(lines)} 个"
         )
-    return "\n".join(hits)
+    if truncated:
+        notes.append(f"命中过多，仅显示前 {MAX_GLOB_RESULTS} 个，请用更精确的 pattern")
+    if notes:
+        text += "\n...（" + "；".join(notes) + "）"
+    return text
 
 
 def create_server(root: str | None = None) -> FastMCP:

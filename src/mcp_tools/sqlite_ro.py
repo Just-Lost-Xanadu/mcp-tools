@@ -40,6 +40,10 @@ MAX_ROWS = 200
 MAX_TABLES = 200   # list_tables 结果上限，与 query_sql 的行数上限保持一致的收敛口径
 MAX_CELL_CHARS = 2000     # 单个单元格上限：行数上限约束不了"单行一个超大值"
 MAX_OUTPUT_CHARS = 20000  # 单次工具输出总上限（与 read_file 的 MAX_READ_CHARS 同属收敛口径）
+# SQLite 单值上限（字节）。只靠"渲染时截断"挡不住 `SELECT randomblob(400000000)`：
+# fetchmany 会先把整个 BLOB 物化成 Python bytes，再 str() 还会膨胀数倍，峰值内存远超
+# 输出上限。这里在连接层直接限长，让超大值在读取阶段就失败，而不是把进程打爆。
+MAX_VALUE_BYTES = 1_000_000
 # 结尾那行"...（提示）"是在渲染循环 break 之后无条件追加的，因此必须在预算里先给它留位置，
 # 否则"单次输出 ≤ MAX_OUTPUT_CHARS"这条声明会失效（实测溢出到 20054 字符）。
 _NOTE_RESERVE_CHARS = 200
@@ -57,6 +61,11 @@ def _connect(db_path: Path) -> sqlite3.Connection:
         raise FileNotFoundError(f"数据库不存在：{db_path}（先运行 scripts/make_demo_db.py）")
     uri = f"{db_path.resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    # 单值长度上限（Python 3.11+ 提供 setlimit；旧解释器没有这个方法时保持原行为）。
+    # 防止 SELECT randomblob(...) / 超大 TEXT 先把内存吃掉，再靠返回值截断了事。
+    setlimit = getattr(conn, "setlimit", None)
+    if callable(setlimit):
+        setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
     # busy_timeout 显式写死：Python 的 sqlite3.connect 默认 timeout=5.0 **已经等于** 5000ms，
     # 所以这行不是为了"不设就会抛 database is locked"（不设也是 5000），而是把这个值钉在
     # 本模块里——将来若有人改 connect 的 timeout（或换包装库），这里不会跟着变。
@@ -72,9 +81,22 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 
 def _clip_cell(value) -> tuple[str, bool]:
-    """把单元格渲染成文本并做长度收敛，返回 (文本, 是否被截断)。"""
+    """把单元格渲染成文本并做长度收敛，返回 (文本, 是否被截断)。
+
+    BLOB 必须**先按字节截断再解码/转十六进制**：直接 `str(bytes)` 会把每个字节渲染成
+    4 个字符（`b'\\x00...'`），既放大约 4 倍内存，也让下面的字符数上限形同虚设。
+    """
     if value is None:
         return "", False
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        if len(raw) > MAX_CELL_CHARS // 2:
+            preview = raw[: MAX_CELL_CHARS // 2].hex()
+            return (
+                f"<BLOB {len(raw)} bytes> {preview}…（单元格过长，已截断）",
+                True,
+            )
+        return raw.hex(), False
     text = value if isinstance(value, str) else str(value)
     if len(text) > MAX_CELL_CHARS:
         return text[:MAX_CELL_CHARS] + f"…（单元格过长，已截断前 {MAX_CELL_CHARS} 字符）", True
@@ -251,9 +273,19 @@ def query_sql(db_path: str, sql: str) -> str:
     sql = validate_readonly_sql(sql)
     conn = _connect(Path(db_path))
     try:
-        cur = conn.execute(sql)
-        columns = [d[0] for d in cur.description] if cur.description else []
-        rows = cur.fetchmany(MAX_ROWS + 1)
+        try:
+            cur = conn.execute(sql)
+            columns = [d[0] for d in cur.description] if cur.description else []
+            rows = cur.fetchmany(MAX_ROWS + 1)
+        except sqlite3.Error as exc:
+            # SQLITE_LIMIT_LENGTH 命中时，SQLite 会报 "string or blob too big"。
+            # 这是"结果超限"而不是 SQL 语法/权限错误，给模型一个可读提示。
+            if "too big" in str(exc).lower():
+                return (
+                    f"（查询结果包含超过 {MAX_VALUE_BYTES} 字节的单个值，已拒绝返回；"
+                    "请用 substr()/hex() 等只取需要的片段）"
+                )
+            raise
         truncated = len(rows) > MAX_ROWS
         rows = rows[:MAX_ROWS]
     finally:

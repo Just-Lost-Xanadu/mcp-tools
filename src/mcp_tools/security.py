@@ -29,13 +29,13 @@ _SQL_UNION = re.compile(r"\bunion\b")
 # 写类 PRAGMA 黑名单。**必须允许 schema 限定名**：原先只写 `pragma\s+(name)`，
 # 于是 `PRAGMA main.journal_mode=WAL`、`PRAGMA "journal_mode"=WAL`、
 # `PRAGMA main.wal_checkpoint(TRUNCATE)` 全部能过闸——docstring 声称这一层"单独拦截"，
-# 实际只拦得住不带前缀的写法。现在补上可选的 `schema.` 前缀（含带引号/方括号的写法）。
+# 实际只拦得住不带前缀的写法。现在补上可选的 `schema.` 前缀（含带引号/方括号/反引号的写法）。
 # 注意这不改变"黑名单不全"的事实：`PRAGMA query_only=OFF`、`PRAGMA writable_schema=ON`
 # 仍能过闸（README 如实写明），真正兜住写操作的自始至终是 mode=ro 只读 URI。
 _SQL_PRAGMA_WRITE = re.compile(
     r"\bpragma\s+"
-    r"(?:[\w\"'\[\]]+\s*\.\s*)?"     # 可选 schema 前缀：main. / "main". / [main].
-    r"[\"'\[\]]?"                    # 名字本身也可能被引号/方括号包起来
+    r"(?:[\w\"'\[\]`]+\s*\.\s*)?"     # 可选 schema 前缀：main. / "main". / [main]. / `main`.
+    r"[\"'\[\]`]?"                    # 名字本身也可能被引号/方括号/反引号包起来
     r"(journal_mode|synchronous|locking_mode|wal_checkpoint|cache_size)",
     re.IGNORECASE,
 )
