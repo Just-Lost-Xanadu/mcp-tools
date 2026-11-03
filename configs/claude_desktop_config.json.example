@@ -1,0 +1,27 @@
+{
+  "_说明": "这是【产物形状参考模板】，不需要手改，程序也不会读取它。真正的 configs/claude_desktop_config.json 由 python scripts/gen_configs.py 生成；把生成的 mcpServers 整段并入 Claude Desktop 的配置后重启即可。若 demo.db 不存在，先跑 python scripts/make_demo_db.py。",
+  "mcpServers": {
+    "sqlite-ro": {
+      "command": "<你的 .venv 解释器绝对路径，例如 D:/work/mcp-tools/.venv/Scripts/python.exe>",
+      "cwd": "<仓库根绝对路径，例如 D:/work/mcp-tools>",
+      "args": [
+        "-m",
+        "mcp_tools.sqlite_ro"
+      ],
+      "env": {
+        "MCP_SQLITE_DB": "<仓库根>/demo.db"
+      }
+    },
+    "files-safe": {
+      "command": "<同 sqlite-ro 的 command>",
+      "cwd": "<同 sqlite-ro 的 cwd>",
+      "args": [
+        "-m",
+        "mcp_tools.files_safe"
+      ],
+      "env": {
+        "MCP_FILES_ROOT": "<同 sqlite-ro 的 cwd>"
+      }
+    }
+  }
+}

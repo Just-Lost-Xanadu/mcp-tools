@@ -1,0 +1,102 @@
+"""工具域共用的安全守卫：只读 SQL / 路径白名单。
+
+两个 server（sqlite_ro / files_safe）内部都复用这里的校验函数，保证"安全逻辑只写一份、
+任何人/任何场景都走同一闸口"。
+
+原则：宁可拒绝、不可放行。**本模块的校验函数一律抛 ValueError**（经 MCP 表现为 isError=true）。
+注意区分两类返回：校验失败（越界/非法输入）是抛异常；而工具函数自身发现的"非错误但无结果"
+（`不是目录：…`、`不是文件：…`、`（无匹配文件）`）是**正常文本**（isError=false）——
+消费方只看 isError 时不会把它当成失败。DB/IO 异常则向上抛出（v1 未做统一错误包裹，
+会直接冒泡成 MCP 错误）。
+
+【设计说明：为何用模块函数而不是 class？】
+本项目保持小：两处安全校验彼此无共享状态、无生命周期，模块顶层函数是"最简组合"。
+如果未来出现"多个 server 各自实例化不同白名单 / 不同只读范围"的需求（要带配置的状态），
+就应重构为身份类，例如：
+    class ReadonlyGuard:
+        def __init__(self, allow_keywords: set[str]): ...
+        def validate(self, sql: str) -> str: ...
+调用方按需 `ReadonlyGuard(allow_keywords={...})` 并持有实例——这在语义上等价但把
+"每个 server 自己的约束"变成了对象状态，多个实例互不干扰。
+本项目现在没有这种"多实例不同配置"的场景，所以保留模块函数以减熵。
+"""
+
+import re
+from pathlib import Path
+
+_SQL_HEAD = re.compile(r"^\s*(select|with|explain|pragma)\b", re.IGNORECASE)
+_SQL_UNION = re.compile(r"\bunion\b")
+# 写类 PRAGMA 黑名单。**必须允许 schema 限定名**：原先只写 `pragma\s+(name)`，
+# 于是 `PRAGMA main.journal_mode=WAL`、`PRAGMA "journal_mode"=WAL`、
+# `PRAGMA main.wal_checkpoint(TRUNCATE)` 全部能过闸——docstring 声称这一层"单独拦截"，
+# 实际只拦得住不带前缀的写法。现在补上可选的 `schema.` 前缀（含带引号/方括号/反引号的写法）。
+# 注意这不改变"黑名单不全"的事实：`PRAGMA query_only=OFF`、`PRAGMA writable_schema=ON`
+# 仍能过闸（README 写明），真正兜住写操作的自始至终是 mode=ro 只读 URI。
+_SQL_PRAGMA_WRITE = re.compile(
+    r"\bpragma\s+"
+    r"(?:[\w\"'\[\]`]+\s*\.\s*)?"     # 可选 schema 前缀：main. / "main". / [main]. / `main`.
+    r"[\"'\[\]`]?"                    # 名字本身也可能被引号/方括号/反引号包起来
+    r"(journal_mode|synchronous|locking_mode|wal_checkpoint|cache_size)",
+    re.IGNORECASE,
+)
+_SQL_BLOCK = (";", "--", "/*", "*/", "\\")
+
+
+def validate_readonly_sql(sql: str) -> str:
+    """只允许单条只读查询：以 select/with/explain/pragma 开头，
+    且不含多语句/注释/UNION/写类 PRAGMA 特征。
+
+    被调用方：sqlite_ro.query_sql 在真正执行前先过这里（第一道闸）。
+
+    返回：去掉首尾空白的原 SQL（放行时原样返回，不做任何改写）。
+    抛出：ValueError —— 命中任意一条禁止特征即抛，绝不静默放行。
+
+    - union 只按整词拦（\\bunion\\b），避免误伤含 union 子串的列名/字符串
+      （如 communication、reunion）；真正的写库由"只读 URI + query_only"双保险兜底。
+    - describe/pragma 曾被一起放行，但 SQLite 并没有 DESCRIBE 语句（`describe_table`
+      走的是 PRAGMA table_info，且不经过本闸），放行它只会让这类语句在执行期报语法错误，
+      已删除；PRAGMA 保留放行，写入类 PRAGMA 由 _SQL_PRAGMA_WRITE 单独拦截（含
+      `PRAGMA main.journal_mode=...` 这类 schema 限定写法）。**但黑名单本来就列不全**：
+      `PRAGMA query_only=OFF`、`PRAGMA writable_schema=ON` 都能过闸（前者实测能把连接上的
+      query_only 关掉），最终写库由 DB 层的 mode=ro 只读 URI 物理兜底。
+    - 这是"粗筛"而不是语法解析：`WITH x AS (SELECT 1) DELETE FROM t` 能通过本闸
+      （SQLite 允许数据修改型 CTE），`SELECT load_extension(...)` 也能通过。
+      真正兜住写操作的是 sqlite_ro 的 mode=ro 只读连接 + query_only。
+    - 同理，`_SQL_BLOCK` 对 `;` / `--` / `/*` / `\\` 做的是**全文子串匹配**，
+      连字符串字面量里的内容也一并拦下——`SELECT 'a--b'`、`WHERE path='C:\\tmp'`
+      这类完全合法的只读查询会被拒。这是的保守取舍（宁可多拒、不可漏放），
+      不是 bug；README「已知取舍」已写明本闸只做粗筛。
+    """
+    if not sql or not isinstance(sql, str):
+        raise ValueError("SQL 不能为空")
+    if not _SQL_HEAD.match(sql):
+        raise ValueError("仅允许以 SELECT/WITH/EXPLAIN/PRAGMA 开头的单条只读查询")
+    lowered = sql.lower()
+    for token in _SQL_BLOCK:
+        if token in lowered:
+            raise ValueError(f"检测到不允许的内容：{token}")
+    if _SQL_UNION.search(lowered):
+        raise ValueError("检测到不允许的内容：union")
+    if _SQL_PRAGMA_WRITE.search(lowered):
+        raise ValueError("检测到不允许的内容：写类 PRAGMA")
+    return sql.strip()
+
+
+def resolve_within_root(path: str, root: Path) -> Path:
+    """把传入的相对/绝对路径，realpath 归一化后确保落在白名单根目录内（防目录穿越）。
+
+    被调用方：files_safe 的 list_dir / read_file（入口第一步）与 glob_files（每个命中），
+    处理：绝对路径直接用；相对路径视为"相对 root"解析；随后 .resolve() 跟掉 .. 与符号链接，
+    只剩真路径再判归属。
+
+    返回：解析后的绝对 Path（已确认在 root 内）。
+    抛出：ValueError —— 解析后落在 root 之外（含恰为 root 的祖先），即穿越/越权，直接拒。
+    """
+    root = root.resolve()
+    target = Path(path)
+    if not target.is_absolute():
+        target = root / target
+    resolved = target.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise ValueError(f"路径超出白名单目录：{path}")
+    return resolved

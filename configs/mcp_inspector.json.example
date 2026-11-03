@@ -1,0 +1,27 @@
+{
+  "_说明": "这是【产物形状参考模板】，不需要手改，程序也不会读取它。真正的 configs/mcp_inspector.json 由 python scripts/gen_configs.py 生成——脚本从自身位置推导仓库根、用运行它的解释器作为 command，所以 clone 到任何目录都只需重跑一次生成命令，不用填任何路径。",
+  "mcpServers": {
+    "sqlite-ro": {
+      "command": "<你的 .venv 解释器绝对路径，例如 D:/work/mcp-tools/.venv/Scripts/python.exe>",
+      "cwd": "<仓库根绝对路径，例如 D:/work/mcp-tools>",
+      "args": [
+        "-m",
+        "mcp_tools.sqlite_ro"
+      ],
+      "env": {
+        "MCP_SQLITE_DB": "<仓库根>/demo.db"
+      }
+    },
+    "files-safe": {
+      "command": "<同 sqlite-ro 的 command>",
+      "cwd": "<同 sqlite-ro 的 cwd>",
+      "args": [
+        "-m",
+        "mcp_tools.files_safe"
+      ],
+      "env": {
+        "MCP_FILES_ROOT": "<同 sqlite-ro 的 cwd>"
+      }
+    }
+  }
+}

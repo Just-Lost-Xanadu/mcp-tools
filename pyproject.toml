@@ -1,0 +1,22 @@
+[project]
+name = "mcp-tools"
+version = "0.1.0"
+description = "企业 MCP 工具套件：只读 SQLite / 受限文件系统（stdio 接入）"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.9,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mcp_tools*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

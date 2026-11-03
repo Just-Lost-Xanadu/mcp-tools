@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# 数据与演示库（demo.db 由 scripts/make_demo_db.py 生成，不入库）
+.env
+.env.*
+*.db
+*.sqlite
+data/
+
+# MCP 客户端配置：由 scripts/gen_configs.py 按本机路径生成，因此不入库
+# （*.json.example 只是"产物形状"参考，不需要手改）
+configs/*.json
+!configs/*.json.example
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
