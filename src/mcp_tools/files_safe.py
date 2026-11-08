@@ -74,7 +74,9 @@ def list_dir(root: Path, relative_dir: str = ".") -> str:
         notes.append(
             f"受 {MAX_OUTPUT_CHARS} 字符上限所限，实际只显示了前 {len(lines)} 个"
         )
-    if truncated:
+    # 字符上限已经把列表截短时，上面那条已经报了实际条数；
+    # 不能再补一句"仅显示前 MAX_LIST_ENTRIES 个"——实测两道闸同时生效时它会虚报条数。
+    elif truncated:
         notes.append(f"条目过多，仅显示前 {MAX_LIST_ENTRIES} 个，请指明更具体的子目录")
     if notes:
         text += "\n...（" + "；".join(notes) + "）"
@@ -121,19 +123,31 @@ def _glob_matches(relative: str, pattern: str) -> bool:
 
     # `**/` 可以匹配"零个或多个目录"。只剥离**开头**的 `**/` 不够：
     # `src/**/*.py` 里的 `**/` 同样应该能匹配零层，即 `src/a.py` 也该命中。
-    # 这里对每一处 `**/` 生成"保留 / 去掉"两种变体，再逐个用 fnmatch 判断。
+    # 这里对**每一处** `**/` 独立枚举"保留 / 去掉"，生成 2^n 个变体，
+    # 而不是每次只去掉第一处——后者会漏掉 `a/**/b/**/c` → `a/**/b/c`
+    # 这种"保留前面的 `**/`、只去掉后面的"组合（实测漏配）。
     # 变体数上限防住恶意 pattern 的指数膨胀（超过 1024 种就只用原 pattern）。
-    variants: set[str] = {pattern}
-    for _ in range(pattern.count("**/")):
-        expanded = set(variants)
-        for item in variants:
-            idx = item.find("**/")
-            if idx >= 0:
-                expanded.add(item[:idx] + item[idx + 3 :])
-        variants = expanded
-        if len(variants) > 1024:
-            variants = {pattern}
+    positions = []
+    start = 0
+    while True:
+        idx = pattern.find("**/", start)
+        if idx < 0:
             break
+        positions.append(idx)
+        start = idx + 3
+    if len(positions) > 10:  # 2^10 已到上限，更多变体没有实际价值
+        variants = {pattern}
+    else:
+        variants = set()
+        for mask in range(1 << len(positions)):
+            item = pattern
+            offset = 0
+            for j, pos in enumerate(positions):
+                if mask >> j & 1:
+                    cut = pos - offset
+                    item = item[:cut] + item[cut + 3 :]
+                    offset += 3
+            variants.add(item)
     return any(fnmatch.fnmatchcase(relative, item) for item in variants)
 
 
@@ -177,9 +191,12 @@ def _iter_files_pruning_dot_dirs(root: Path, pattern: str):
     """
     import os
 
-    # pattern 里的反斜杠统一成正斜杠再匹配：输入侧本来两种分隔符都接受
-    # （实测 `glob('a/*.txt')` 与 `glob('a\\*.txt')` 等价），归一化后比较的是同一种形态。
-    norm_pattern = pattern.replace("\\", "/")
+    # pattern 里的反斜杠统一成正斜杠，并去掉 `.` 与重复分隔符：
+    # 输入侧本来就接受 `./a/*.py`、`a//*.py` 这类写法，若原样交给匹配器会漏配
+    # （实测 `./*.py` 返回"无匹配文件"）。`..` 已在 glob_files 入口被拒绝。
+    from pathlib import PurePosixPath
+
+    norm_pattern = PurePosixPath(pattern.replace("\\", "/")).as_posix()
 
     for dirpath, dirnames, filenames in os.walk(root, topdown=True):
         here = Path(dirpath)
@@ -275,7 +292,8 @@ def glob_files(root: Path, pattern: str) -> str:
         notes.append(
             f"受 {MAX_OUTPUT_CHARS} 字符上限所限，实际只显示了前 {len(lines)} 个"
         )
-    if truncated:
+    # 同上：字符闸已生效时不再虚报"仅显示前 MAX_GLOB_RESULTS 个"。
+    elif truncated:
         notes.append(f"命中过多，仅显示前 {MAX_GLOB_RESULTS} 个，请用更精确的 pattern")
     if notes:
         text += "\n...（" + "；".join(notes) + "）"

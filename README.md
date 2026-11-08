@@ -1,6 +1,6 @@
 # mcp-tools · 企业 MCP 工具套件
 
-> **测试口径（2026-11-03 复核，与 kbase-agent / ecommerce-dw 两个 README 一致）**：`pytest -q` → kbase-agent **40 passed**、ecommerce-dw **32 passed**、mcp-tools **30 passed**，合计 **102**。README 内的历史段落保留更早的 77/51/38、60/40/30（=130）等记录，不再作为当前口径引用。
+> **测试口径（2026-11-08 复核，与 kbase-agent / ecommerce-dw 两个 README 一致）**：`pytest -q` → kbase-agent **40 passed**、ecommerce-dw **32 passed**、mcp-tools **30 passed**，合计 **102**。README 内的历史段落保留更早的 77/51/38、60/40/30（=130）等记录，不再作为当前口径引用。
 
 > 把两类企业常见能力封装成**标准 MCP Server**，任何 MCP 客户端（Claude Desktop / Cursor / MCP Inspector / 自研 Agent）即插即用。
 >

@@ -98,7 +98,7 @@ def test_glob_absolute_pattern_rejected(tmp_path):
 def test_sql_union_word_boundary_not_substring():
     # 含 union 子串的字符串不应被误拦
     assert validate_readonly_sql(
-        "SELECT name FROM regions WHERE name='communication'"
+        "SELECT name FROM regions WHERE name='reunion'"
     )
     # 真正的 UNION 关键字仍拦
     with pytest.raises(ValueError):

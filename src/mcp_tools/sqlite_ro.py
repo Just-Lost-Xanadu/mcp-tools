@@ -168,9 +168,10 @@ def _rows_to_text(columns: list[str], rows: list[tuple], truncated: bool) -> str
             f"已取回 {len(rows)} 行，其中只有前 {shown} 行能显示（受总输出上限所限），"
             "请用更精确的 SQL 缩小范围"
         )
-    if not rows and not notes:
+    if not rows:
         # 空结果集此前只回一行表头（如 `id | v`）——与"一行数据、其两列恰好是 id/v"同形，
         # 模型读不出"0 行"，可能据此以为查到了东西。显式标出来（与 list_dir 的"（空目录）"同口径）。
+        # 注意：即使表头被截断（notes 非空），也必须标"0 行"，否则长列名场景会漏掉这个保护。
         lines.append("（0 行）")
     if notes:
         lines.append("...（" + "；".join(notes) + "）")
@@ -216,7 +217,8 @@ def list_tables(db_path: str) -> str:
         notes.append(
             f"表名过长，受 {MAX_OUTPUT_CHARS} 字符上限所限，实际只显示了前 {len(lines)} 张"
         )
-    if truncated:
+    # 字符闸已生效时不再补"仅显示前 MAX_TABLES 张"，避免两闸同开时虚报条数。
+    elif truncated:
         notes.append(f"表过多，仅显示前 {MAX_TABLES} 张")
     if notes:
         text += "\n...（" + "；".join(notes) + "）"
