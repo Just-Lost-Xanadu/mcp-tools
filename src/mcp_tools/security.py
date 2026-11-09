@@ -32,11 +32,18 @@ _SQL_UNION = re.compile(r"\bunion\b")
 # 实际只拦得住不带前缀的写法。现在补上可选的 `schema.` 前缀（含带引号/方括号/反引号的写法）。
 # 注意这不改变"黑名单不全"的事实：`PRAGMA query_only=OFF`、`PRAGMA writable_schema=ON`
 # 仍能过闸（README 如实写明），真正兜住写操作的自始至终是 mode=ro 只读 URI。
+#
+# 但黑名单必须区分"读"与"写"：早先只按名字匹配，于是 `PRAGMA journal_mode`、
+# `PRAGMA synchronous`、`PRAGMA cache_size` 这些**纯读取**的库体检查询也被拒
+# （实测全部报"写类 PRAGMA"），把最常用的只读诊断语句误伤了。写形态只有两种：
+# 赋值 `= value` 与调用 `(...)`（如 `wal_checkpoint(TRUNCATE)`），所以名字后面
+# 必须紧跟 `=` 或 `(` 才算写；单独出现名字视为读取，放行。
 _SQL_PRAGMA_WRITE = re.compile(
     r"\bpragma\s+"
     r"(?:[\w\"'\[\]`]+\s*\.\s*)?"     # 可选 schema 前缀：main. / "main". / [main]. / `main`.
     r"[\"'\[\]`]?"                    # 名字本身也可能被引号/方括号/反引号包起来
-    r"(journal_mode|synchronous|locking_mode|wal_checkpoint|cache_size)",
+    r"(journal_mode|synchronous|locking_mode|wal_checkpoint|cache_size)"
+    r"[\"'\[\]`]?\s*(?==|\()",        # 只有"赋值"或"调用"才是写；纯读取放行
     re.IGNORECASE,
 )
 _SQL_BLOCK = (";", "--", "/*", "*/", "\\")

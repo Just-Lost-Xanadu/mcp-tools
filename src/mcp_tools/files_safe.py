@@ -92,6 +92,13 @@ def read_file(root: Path, relative_path: str) -> str:
     多读 1 个字符只为判断"是否被截断"。
     """
     target = resolve_within_root(relative_path, root)
+    # NTFS 备用数据流（ADS）：`host.txt:hidden` 能读到流内容，但 `list_dir`/`glob_files`
+    # 只看得见 `host.txt`——等于在白名单根里开了一条"列举不可见"的隐藏读取通道
+    # （实测可以读到写进 `:hidden` 的字符串）。不是根外逃逸，但工具契约是"读列举得到的
+    # 文件"，所以末段含 `:` 直接拒。注意盘符里的 `C:` 只出现在绝对路径首段，
+    # resolve 后已归一，不会被这条误伤。
+    if ":" in target.name:
+        raise ValueError(f"路径含备用数据流（ADS）标记，已拒绝：{relative_path}")
     if not target.is_file():
         return f"不是文件：{relative_path}"
     with target.open("r", encoding="utf-8", errors="replace") as fh:
@@ -135,19 +142,21 @@ def _glob_matches(relative: str, pattern: str) -> bool:
             break
         positions.append(idx)
         start = idx + 3
-    if len(positions) > 10:  # 2^10 已到上限，更多变体没有实际价值
-        variants = {pattern}
-    else:
-        variants = set()
-        for mask in range(1 << len(positions)):
-            item = pattern
-            offset = 0
-            for j, pos in enumerate(positions):
-                if mask >> j & 1:
-                    cut = pos - offset
-                    item = item[:cut] + item[cut + 3 :]
-                    offset += 3
-            variants.add(item)
+    if len(positions) > 10:
+        # 早先这里静默退回"只用原 pattern"，结果 `**/` 超过 10 处的合法 pattern
+        # 会退化成零匹配——文件明明在，工具却说"（无匹配文件）"，且不报错。
+        # 静默改语义比拒绝更糟：消费方无法区分"没匹配"和"pattern 太复杂"。
+        raise ValueError("glob 里 `**/` 最多 10 处（再多的组合没有实际区分价值）")
+    variants = set()
+    for mask in range(1 << len(positions)):
+        item = pattern
+        offset = 0
+        for j, pos in enumerate(positions):
+            if mask >> j & 1:
+                cut = pos - offset
+                item = item[:cut] + item[cut + 3 :]
+                offset += 3
+        variants.add(item)
     return any(fnmatch.fnmatchcase(relative, item) for item in variants)
 
 

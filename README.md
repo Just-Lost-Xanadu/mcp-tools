@@ -78,12 +78,19 @@ requirements.lock      # 已验证可跑的依赖组合（实测 mcp 1.30.0，Py
   - **只读 URI `mode=ro`（硬保证）**：SQLite 在文件层拒绝写，实测 `WITH x AS (SELECT 1) DELETE FROM t` 到这里报 `attempt to write a readonly database`。这是唯一无法被 SQL 语句解除的一层；
   - 扩展加载已显式关闭（`conn.enable_load_extension(False)`）：实测 `SELECT load_extension('evil')` 报 `not authorized`。Python `sqlite3` 默认即关闭，这里显式声明是为了不依赖解释器默认值。
 - 语句执行级超时未实现（只有结果行数上限 200），README 不宣称具备该能力。
+- **结果收敛的上限是"整格长度"，不是"正文字数"**：单元格里的截断提示语算在 2000 字符内（修复前实测 2001 字符的 TEXT 会渲染成 2021 字符、1500 字节 BLOB 会到 2030 字符，等于把"≤2000"这条声明自己撑破）。同理列名过长与总输出上限共用同一套"先留出提示语预算"的算法。
+- **`mode=ro` 只会拒绝写数据，不会拒绝 SQLite 在旁边建 `-wal` / `-shm`**：打开 WAL 模式的库时，SQLite 仍会尝试创建这两个辅助文件（实测查询后目录里多出 `w.db-shm` / `w.db-wal`）。对只读介质或网络共享建议把库先 `PRAGMA wal_checkpoint(TRUNCATE)` 并转回 `journal_mode=DELETE`；本工具不设 `immutable=1`，因为那会在库**有并发写者**时读到过期快照——宁可多两个辅助文件，也不要静默读到旧数据。
+- **读类 `PRAGMA` 是放行的**：`PRAGMA journal_mode` / `synchronous` / `cache_size` 这类**不带赋值也不带括号**的库体检查询现在能过闸（修复前只按名字匹配，把它们全误拦成"写类 PRAGMA"，恰好废掉了最常用的只读诊断语句）。写形态仍拦——`PRAGMA journal_mode=WAL`、`PRAGMA main.wal_checkpoint(TRUNCATE)` 都会被拒。
 - 只读是"文件级"的：`mode=ro` 保护的是**被打开的那个库文件**；不做 SQL 语义级白名单（例如某张表本不该给模型看），也不做按调用方的行级/列级过滤。
+- **非法 UTF-8 不再让工具崩**：`sqlite3` 默认 `text_factory=str` 会在取值时抛 `Could not decode to UTF-8 column …`，而且发生在截断之前，等于让一条脏数据把整次调用打挂。连接层改成 `decode("utf-8", "replace")`——只读工具的定位是"尽力展示"，坏字节显示成 `�` 比抛异常有用。
+- **异常文案不回显服务端绝对路径**：库文件不存在时只报文件名（`数据库不存在：nope.db`），与路径越界那类 `ValueError`（只回显调用方入参）保持一致，避免把部署目录结构泄漏给 MCP 客户端。
 - **文本闸会对合法查询误报（保守取舍，已知且不打算改）**：`_SQL_BLOCK` 对 `;` / `--` / `/*` / `*/` / `\` 做的是全文子串匹配，连字符串字面量里的内容一起拦。实测 `SELECT * FROM regions WHERE name='a--b'`、`... WHERE path='C:\tmp'`、`SELECT 'a*/b'` 都会被拒（错误信息说"检测到不允许的内容"，其实没有注入）。宁可多拒、不可漏放——要精确判定就得做 SQL 语法解析，那超出本套件刻意收敛的边界。
 - **`files-safe` 的唯一边界是"白名单根目录"，根内没有排除项**：
   - **拒绝方式分两种，看 `isError` 的客户端要知道**：路径越界（`../`、绝对路径、junction 逃逸）走 `resolve_within_root` **抛 `ValueError`** → MCP `isError=true`；而 `glob` 的**pattern 拒绝**（绝对路径/`..`/rooted pattern）与"不是文件/不是目录/无匹配"一样返回**正常文本**（`isError=false`），内容本身写明了原因，但只按 `isError` 判断的消费方不会把它当失败；
   - 默认根是**当前工作目录**，而 `scripts/gen_configs.py` 生成的配置把 `MCP_FILES_ROOT` 设成**仓库根**——于是 `list_dir` 会列出 `.git/`、`.venv/`，`read_file` 也能读到它们（都在根内，不算越权）；
   - `glob_files` 已排除点开头路径（避免返回一屏 `.venv` 依赖），且**在遍历时就剪掉这些子树**（不是"走完再过滤"：实测仓库根上 `**/*.py` 由约 590ms 降到约 12ms、`**/*` 由约 1600ms 降到约 30ms），但**这只是一条"结果过滤"，不是权限**——真正的边界始终是白名单根；
+  - `glob` 的 `**/` 组合数有上限（10 处）：超过就**明确报错**，而不是静默退回"只用原 pattern"。修复前实测 `**/`×11 的合法 pattern 会退化成零匹配、还报"（无匹配文件）"——消费方无法区分"没匹配"与"pattern 太复杂"；
+  - `read_file` **拒绝路径末段含 `:`**（NTFS 备用数据流）。实测 `read_file(root,'host.txt:hidden')` 能读到写进 ADS 的内容，而 `list_dir` / `glob` 只看得见 `host.txt`——等于在根内开了一条"列举不可见"的读取通道（不是根外逃逸，但与"只读列举得到的文件"这一契约不符，故直接拒）；
   - 真实使用时应把 `MCP_FILES_ROOT` 指到一个**专用数据目录**，而不是仓库根。演示里用仓库根只是为了让 clone 下来即可跑，README 在此如实说明。
   - **glob 的 `*` 会匹配 `/`**（实现用 `fnmatchcase` 对整条相对路径匹配），所以 `*.py` 等价于"递归匹配所有 py"，不是 shell glob 的"仅当前目录"。本工具始终在 root 内递归遍历、pattern 只做结果过滤；要只看一层请用 `list_dir`。`**/` 额外补了"零个目录"分支，因此 `**/*.py` 能命中顶层文件。
 - 下一步方向：动态工具注册 / 集成到一号项目作为其 MCP 工具源，暂不实现。

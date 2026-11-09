@@ -58,9 +58,16 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     因此"文本层漏放行也无法真正写库"。
     """
     if not db_path.is_file():
-        raise FileNotFoundError(f"数据库不存在：{db_path}（先运行 scripts/make_demo_db.py）")
+        # 只回显文件名，不回显服务端绝对路径：路径类错误（security.py 的 ValueError）
+        # 只回显调用方入参，这里也保持一致，避免把部署目录结构泄漏给 MCP 客户端。
+        raise FileNotFoundError(f"数据库不存在：{db_path.name}（先运行 scripts/make_demo_db.py）")
     uri = f"{db_path.resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    # 非法 UTF-8 兜底：sqlite3 默认 text_factory=str，遇到非 UTF-8 的 TEXT/BLOB-as-text
+    # 会在**取值时**抛 `OperationalError: Could not decode to UTF-8 column ...`，
+    # 且发生在 _clip_cell 之前——于是"超长值截断"那道闸根本到不了，整条工具调用直接崩。
+    # 只读工具的正确行为是"尽力展示"，所以用 replace 解码而不是让客户端收异常。
+    conn.text_factory = lambda b: b.decode("utf-8", "replace")
     # 单值长度上限（Python 3.11+ 提供 setlimit；旧解释器没有这个方法时保持原行为）。
     # 防止 SELECT randomblob(...) / 超大 TEXT 先把内存吃掉，再靠返回值截断了事。
     setlimit = getattr(conn, "setlimit", None)
@@ -91,15 +98,18 @@ def _clip_cell(value) -> tuple[str, bool]:
     if isinstance(value, (bytes, bytearray, memoryview)):
         raw = bytes(value)
         if len(raw) > MAX_CELL_CHARS // 2:
-            preview = raw[: MAX_CELL_CHARS // 2].hex()
-            return (
-                f"<BLOB {len(raw)} bytes> {preview}…（单元格过长，已截断）",
-                True,
-            )
+            prefix = f"<BLOB {len(raw)} bytes> "
+            tail = f"…（单元格过长，上限 {MAX_CELL_CHARS} 字符）"
+            # 上限是**整格**长度（含前缀与提示语），否则"≤2000 字符"的声明会被
+            # 提示语本身撑破——实测 1500 字节 zeroblob 曾渲染成 2030 字符。
+            room = max(0, MAX_CELL_CHARS - len(prefix) - len(tail))
+            return prefix + raw[: room // 2].hex() + tail, True
         return raw.hex(), False
     text = value if isinstance(value, str) else str(value)
     if len(text) > MAX_CELL_CHARS:
-        return text[:MAX_CELL_CHARS] + f"…（单元格过长，已截断前 {MAX_CELL_CHARS} 字符）", True
+        tail = f"…（单元格过长，上限 {MAX_CELL_CHARS} 字符）"
+        room = max(0, MAX_CELL_CHARS - len(tail))
+        return text[:room] + tail, True
     return text, False
 
 
